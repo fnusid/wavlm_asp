@@ -1,0 +1,5 @@
+analysis/
+dataset_samples/
+lightning_logs/
+__pycache__/
+wandb_logs/
