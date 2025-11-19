@@ -248,7 +248,7 @@ if __name__ == "__main__":
         name="wavlm_asp_dual_embedding-orthogonality",
         # name='test_run',
         log_model=False,
-        save_dir="/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_dualemb/wandb_logs",
+        save_dir="/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_dualemb_orthogonality/wandb_logs",
     )
 
     ckpt = pl.callbacks.ModelCheckpoint(
@@ -256,7 +256,7 @@ if __name__ == "__main__":
         mode="min",
         save_top_k=10,
         filename="best-{epoch}-{val_separation:.3f}",
-        dirpath="/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_dualemb/"
+        dirpath="/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_dualemb_orthogonality/"
     )
 
     trainer = pl.Trainer(
