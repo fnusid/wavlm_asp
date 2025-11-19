@@ -42,7 +42,8 @@ class CosineSimilarityLoss(nn.Module):
         cos = torch.matmul(pred, gt.transpose(1, 2))
 
         batch_size = cos.size(0)
-        loss_total = 0.0
+        cosine_loss = 0.0
+        total_loss = 0.0
 
         for b in range(batch_size):
 
@@ -52,13 +53,21 @@ class CosineSimilarityLoss(nn.Module):
 
             # selected cosines with gradient
             sim = cos[b, row_ind, col_ind]             # 2 values
+            
 
             # loss = 1 - mean(sim)
             loss_b = 1.0 - sim.mean()
 
-            loss_total += loss_b
+            cosine_loss += loss_b
 
-        return loss_total / batch_size
+        #orthogonality in the predicted embeddings
+        pred1 = pred[:,0,:]  # [B,D]
+        pred2 = pred[:,1,:]  # [B,D]
+        ortho_cos = F.cosine_similarity(pred1, pred2, dim=-1)
+        ortho_loss = torch.clamp(ortho_cos, min=0.0).mean()  # only penalize positive cosine similarity
+        loss_total = (cosine_loss / batch_size) + ortho_loss
+
+        return {'total_loss': loss_total, 'cosine_loss': cosine_loss / batch_size, 'ortho_loss': ortho_loss}
 
 
 

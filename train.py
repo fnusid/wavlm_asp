@@ -21,14 +21,6 @@ from wavlm_single_embedding.model import SpeakerEncoderWrapper as SingleSpeakerE
 import random
 random.seed(42)
 
-def strip_model_prefix(state):
-    new_state = {}
-    for k, v in state.items():
-        if k.startswith("model."):
-            new_state[k[len("model."):]] = v   # remove "model."
-        else:
-            new_state[k] = v
-    return new_state
 
 class MySpEmb(pl.LightningModule):
     def __init__(
@@ -109,7 +101,9 @@ class MySpEmb(pl.LightningModule):
             emb2 = self.single_sp_model(source[:, 1, :])  # [B, emb_dim]
             gt_embs = torch.stack([emb1, emb2], dim=1)  # [B, 2, emb_dim]
         
-        loss = self.cosine_loss(emb, gt_embs)
+        loss_dict = self.cosine_loss(emb, gt_embs) #{'total_loss': , 'cosine_loss': , 'ortho_loss': }
+
+
         if batch_idx == 0 and self.current_epoch == 0:
             with torch.no_grad():
                 cos_gt = F.cosine_similarity(gt_embs[:,0,:], gt_embs[:,1,:], dim=-1).mean()
@@ -117,16 +111,26 @@ class MySpEmb(pl.LightningModule):
                 print("Mean cos(gt1, gt2) =", cos_gt.item())
                 print("Mean cos(pred1, pred2) =", cos_pred.item())
 
-        self.log(
-            "train/loss",
-            loss,
-            on_step=True,
-            on_epoch=True,
-            prog_bar=True,
-            logger=True,
-            batch_size=mix.shape[0],
-        )
-        return loss
+        # self.log(
+        #     "train/loss",
+        #     loss,
+        #     on_step=True,
+        #     on_epoch=True,
+        #     prog_bar=True,
+        #     logger=True,
+        #     batch_size=mix.shape[0],
+        # )
+        for k, v in loss_dict.items():
+            self.log(
+                f"train/{k}",
+                v,
+                on_step=True,
+                on_epoch=True,
+                prog_bar=True,
+                logger=True,
+                batch_size=mix.shape[0],
+            )
+        return loss_dict['total_loss']
 
     # -----------------------------
     # VALIDATION (per-batch)
@@ -211,7 +215,7 @@ class MySpEmb(pl.LightningModule):
             "optimizer": optimizer,
             "lr_scheduler": {
                 "scheduler": scheduler,
-                "monitor": "train/loss",
+                "monitor": "train/total_loss",
                 "interval": "epoch",
             },
         }
@@ -241,7 +245,7 @@ if __name__ == "__main__":
 
     wandb_logger = WandbLogger(
         project="librispeech-speaker-encoder",
-        name="wavlm_asp_dual_embedding",
+        name="wavlm_asp_dual_embedding-orthogonality",
         # name='test_run',
         log_model=False,
         save_dir="/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_dualemb/wandb_logs",
@@ -259,7 +263,7 @@ if __name__ == "__main__":
         strategy="ddp_find_unused_parameters_true",
         accelerator="gpu",
         devices=[0, 1],
-        max_epochs=500,
+        max_epochs=100,
         logger=wandb_logger,
         callbacks=[ckpt],
         gradient_clip_val=5.0,
