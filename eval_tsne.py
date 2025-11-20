@@ -165,7 +165,22 @@ def extract_dual_embeddings(model, speaker_files, max_per_spk=40, device="cuda")
 # 5. t-SNE Plot
 # -------------------------------------------------
 def plot_tsne(embs, labels, save_path):
+    #based on labels, get all the embs corresponding to each unique label, take mean and calculate the cosine similarity for each pair of centroids
+    unique_speakers = np.unique(labels)
+    centroids = []
+    for spk in unique_speakers:
+        spk_embs = embs[labels == spk]
+        centroid = np.mean(spk_embs, axis=0)
 
+        centroids.append(centroid)
+
+    centroids = np.vstack(centroids)
+    print("Centroid cosine similarity matrix:")
+    centroids_norm = centroids / np.linalg.norm(centroids, axis=1, keepdims=True)
+    cos_sim_matrix = np.dot(centroids_norm, centroids_norm.T)
+    print(cos_sim_matrix)
+    
+    
     tsne = TSNE(
         n_components=2,
         perplexity=20,
@@ -194,8 +209,8 @@ def plot_tsne(embs, labels, save_path):
 if __name__ == "__main__":
 
     META = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/Libri2Mix/wav16k/min/metadata/mixture_dev_mix_clean.csv"
-    CKPT = "/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_dualemb/best-epoch=48-val_separation=0.000.ckpt"
-    SAVE = "/home/sidharth./codebase/wavlm_dual_embedding/analysis/tsne/tsne_dual_dev_seed44.png"
+    CKPT = "/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_dualemb_orthogonality/best-epoch=22-val_separation=0.000.ckpt"
+    SAVE = "/home/sidharth./codebase/wavlm_dual_embedding/analysis/tsne/tsne_dual_dev_seed44_orthogonal.png"
 
     # Load metadata
     metadata = parse_metadata(META)

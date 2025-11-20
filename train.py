@@ -245,18 +245,18 @@ if __name__ == "__main__":
 
     wandb_logger = WandbLogger(
         project="librispeech-speaker-encoder",
-        name="wavlm_asp_dual_embedding-orthogonality",
+        name="wavlm_asp_dual_embedding-orthogonality_mhqa",
         # name='test_run',
         log_model=False,
-        save_dir="/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_dualemb_orthogonality/wandb_logs",
+        save_dir="/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_dualemb_orthogonality_mhqa/wandb_logs",
     )
 
     ckpt = pl.callbacks.ModelCheckpoint(
-        monitor="train/loss",
+        monitor="train/total_loss",
         mode="min",
         save_top_k=10,
         filename="best-{epoch}-{val_separation:.3f}",
-        dirpath="/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_dualemb_orthogonality/"
+        dirpath="/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_dualemb_orthogonality_mhqa/"
     )
 
     trainer = pl.Trainer(
@@ -269,6 +269,8 @@ if __name__ == "__main__":
         gradient_clip_val=5.0,
         enable_checkpointing=True,
     )
+    
+    #Test run to see the algorithm learns
 
     # trainer = pl.Trainer(
     #     accelerator='gpu',
@@ -281,15 +283,9 @@ if __name__ == "__main__":
     #     num_sanity_val_steps=0,
     #     enable_checkpointing=False,
     # )
+    
 
-    # trainer = pl.Trainer(
-    #     accelerator="gpu",
-    #     devices=1,
-    #     max_epochs=1,
-    #     limit_train_batches=1,
-    #     limit_val_batches=1,
-    #     num_sanity_val_steps=0,
-    # )
+
     trainer.fit(model, datamodule=dm)
     # trainer.validate(model, datamodule=dm)
     wandb.finish()

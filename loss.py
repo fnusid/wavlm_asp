@@ -64,6 +64,7 @@ class CosineSimilarityLoss(nn.Module):
         pred1 = pred[:,0,:]  # [B,D]
         pred2 = pred[:,1,:]  # [B,D]
         ortho_cos = F.cosine_similarity(pred1, pred2, dim=-1)
+        
         ortho_loss = torch.clamp(ortho_cos, min=0.0).mean()  # only penalize positive cosine similarity
         loss_total = (cosine_loss / batch_size) + ortho_loss
 

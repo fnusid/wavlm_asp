@@ -5,6 +5,66 @@ from transformers import WavLMModel, WavLMConfig
 from speechbrain.lobes.models.ECAPA_TDNN import AttentiveStatisticsPooling
 
 
+class MultiHeadQueryPooling(nn.Module):
+    def __init__(self, input_dim = 768, output_dim = 256, num_queries=2, num_heads=4):
+
+        super().__init__()
+        self.input_dim = input_dim
+        self.num_queries = num_queries
+        self.num_heads = num_heads
+        self.head_dim = input_dim // num_heads 
+        assert input_dim % num_heads == 0, "output_dim must be divisible by num_heads"
+
+        self.key_proj = nn.Linear(input_dim, input_dim)
+        self.value_proj = nn.Linear(input_dim, input_dim)
+
+        self.queries = nn.Parameter(torch.randn(1, num_heads, num_queries, self.head_dim))
+
+        self.out_proj = nn.Linear(input_dim, output_dim)
+
+        self._reset_parameters()
+    
+    def _reset_parameters(self):
+        nn.init.xavier_uniform_(self.queries)
+        nn.init.xavier_uniform_(self.key_proj.weight)
+        nn.init.xavier_uniform_(self.value_proj.weight)
+        nn.init.xavier_uniform_(self.out_proj.weight)
+
+    def forward(self, x):
+        """
+        x: [B, T, D=768]
+        Returns:
+            pooled: [B, num_queries=nsp, output_dim]
+        """
+     
+        B, T, D = x.shape
+
+        # Project keys and values
+        K = self.key_proj(x).view(B,T, self.num_heads, self.head_dim)    # [B, T, nH, HD]
+        V = self.value_proj(x).view(B,T, self.num_heads, self.head_dim)  # [B, T, nH, HD]
+
+        #Transpose for attention computation
+        K = K.permute(0,2,1,3)  # [B, nH, T, HD]
+        V = V.permute(0,2,1,3)  # [B, nH, T, HD]
+
+        #prepare queries
+        Q = self.queries.expand(B, -1, -1, -1)  # [B, nH, nQ, HD]
+
+        #calculte attention scores
+        scores = torch.einsum('bhqd, bhdt -> bhqt', Q, K.transpose(-1, -2)) / (self.head_dim ** 0.5)  # [B, nH, nQ, T]
+        attn_weights = F.softmax(scores, dim=-1)  # [B, nH, nQ, T]
+
+        #Aggregate values
+
+        emb_heads = torch.einsum('bhqt, bhtd -> bhqd', attn_weights, V)  # [B, nH, nQ, HD]
+
+        emb = emb_heads.permute(0,2,1,3).reshape(B, self.num_queries, D)  # [B, nQ, D]
+        emb = self.out_proj(emb)  # [B, nQ, output_dim]
+
+        return emb
+
+
+
 class SpeakerEncoder(nn.Module):
     def __init__(self, feat_dim, emb_dim=256):
         super().__init__()
@@ -40,12 +100,8 @@ class SpeakerEncoderDualWrapper(nn.Module):
         self.wavlm_out = 768
         self.emb_dim = emb_dim
 
-        # Linear 768 -> 256
-        self.projector = nn.Linear(self.wavlm_out, 2*emb_dim)
-
-        # ASP-based speaker encoder
-        self.encoder1 = SpeakerEncoder(feat_dim=emb_dim, emb_dim=emb_dim)
-        self.encoder2 = SpeakerEncoder(feat_dim=emb_dim, emb_dim=emb_dim)
+        # Multi-head query pooling to get 2 streams
+        self.mhqp = MultiHeadQueryPooling(input_dim=self.wavlm_out, output_dim = self.emb_dim, num_queries=2, num_heads=4)
 
     def forward(self, audio):
         """
@@ -57,27 +113,16 @@ class SpeakerEncoderDualWrapper(nn.Module):
         # WavLM gives [B, T_frames, 768]
         feats = self.wavlm(audio).last_hidden_state   # [B, T, 768]
 
-        # Project to smaller dimension
-        proj = self.projector(feats)   # [B, T, 512]
+        #multi-head query pooling to get 2 streams
+        emb = self.mhqp(feats)  # [B, 2, emb_dim]
+        
 
-        # Split for dual embedding
-        proj1, proj2 = torch.chunk(proj, 2, dim=-1)  # each [B, T, 256]
-
-
-        # ASP expects [B, D, T]
-        proj1 = proj1.transpose(1, 2)    # [B, 256, T]
-        proj2 = proj2.transpose(1, 2)    # [B, 256, T]
-
-        # Get speaker embedding
-        emb1 = self.encoder1(proj1)       # [B, 256]
-        emb2 = self.encoder2(proj2)       # [B, 256]
-        emb = torch.stack([emb1, emb2], dim=1) #[B,2,256]
         return emb
 
 
 if __name__ == "__main__":
     breakpoint()
-    model = SpeakerEncoderWrapper(emb_dim=256)
+    model = SpeakerEncoderDualWrapper(emb_dim=256)
     dummy_audio = torch.randn(2, 16000 * 3)  #
     emb = model(dummy_audio)
     print(emb.shape)  # should be [2, 256]
