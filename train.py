@@ -36,7 +36,7 @@ class MySpEmb(pl.LightningModule):
         # -----------------------------
         # 1. Speaker Encoder model
         # -----------------------------
-        self.model = SpeakerEncoderDualWrapper(emb_dim=emb_dim)
+        self.model = SpeakerEncoderDualWrapper(emb_dim=emb_dim, finetune_wavlm = True)
 
         # Optionally unfreeze wavlm if finetuning
         if finetune_encoder:
@@ -231,7 +231,7 @@ if __name__ == "__main__":
     dm = LibriMixDataModule(
         data_root=DATA_ROOT,
         speaker_map_path=SPEAKER_MAP,
-        batch_size=32, 
+        batch_size=16, 
         num_workers=20, # Set this to your preference
         num_speakers=2
     )
@@ -248,7 +248,7 @@ if __name__ == "__main__":
         name="wavlm_asp_dual_embedding-orthogonality_mhqa",
         # name='test_run',
         log_model=False,
-        save_dir="/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_dualemb_orthogonality_mhqa/wandb_logs",
+        save_dir="/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_ft_dualemb_orthogonality_mhqa/wandb_logs",
     )
 
     ckpt = pl.callbacks.ModelCheckpoint(
@@ -256,14 +256,14 @@ if __name__ == "__main__":
         mode="min",
         save_top_k=10,
         filename="best-{epoch}-{val_separation:.3f}",
-        dirpath="/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_dualemb_orthogonality_mhqa/"
+        dirpath="/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_ft_dualemb_orthogonality_mhqa/"
     )
 
     trainer = pl.Trainer(
         strategy="ddp_find_unused_parameters_true",
         accelerator="gpu",
         devices=[0, 1],
-        max_epochs=100,
+        max_epochs=400,
         logger=wandb_logger,
         callbacks=[ckpt],
         gradient_clip_val=5.0,
