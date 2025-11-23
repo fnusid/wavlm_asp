@@ -11,7 +11,7 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from dataset import LibriMixDataModule       
 from model import SpeakerEncoderDualWrapper   
-from loss import LossWraper
+from loss import DualQueryLoss
 from metrics import EmbeddingMetrics
 import wandb
 import sys
@@ -49,7 +49,7 @@ class MySpEmb(pl.LightningModule):
             speaker_map = json.load(f)
 
 
-        self.cosine_loss = LossWraper()
+        self.cosine_loss = DualQueryLoss()
         #Get the teacher model
         self.single_sp_model = SingleSpeakerEncoderWrapper(emb_dim=emb_dim)
         teacher_ckpt_path = "/mnt/disks/data/model_ckpts/librispeech_asp_wavlm/best-epoch=47-val_separation=0.000.ckpt"
@@ -77,64 +77,77 @@ class MySpEmb(pl.LightningModule):
         # -----------------------------
         self.metrics = EmbeddingMetrics(device="cuda")  # will overwrite device at runtime
 
-    def forward(self, wav, return_queries=False):
+    def forward(self, wav, return_queries=False, teacher_embs=None):
         """
         wav: [B, T] (or [B, 1, T])
         returns: [B, 2, emb_dim]
         """
         if return_queries:
-            emb, Q = self.model(wav, return_queries)
+            emb, Q = self.model(wav, return_queries, teacher_embs=teacher_embs)
             return emb, Q
-        return self.model(wav, return_queries)
+        return self.model(wav, return_queries, teacher_embs=teacher_embs)
 
     # -----------------------------
     # TRAINING
     # -----------------------------
     def training_step(self, batch, batch_idx):
         """
-        batch: (wav, speaker_label)
-          wav: [B, T]
-          labels: [B, 2]  (speaker IDs, already mapped to [0..num_classes-1])
+        batch: (mix, source, labels)
+        mix:    [B, T]   or [B,1,T]
+        source: [B, 2,T]
+        labels: [B, 2]
         """
         mix, source, labels = batch
-        
-        emb, Q = self.forward(mix, return_queries=True)                    # [B, 2, emb_dim]
-        #change here
+
+        # 1) Teacher embeddings from frozen single-speaker model
         with torch.no_grad():
             emb1 = self.single_sp_model(source[:, 0, :])  # [B, emb_dim]
             emb2 = self.single_sp_model(source[:, 1, :])  # [B, emb_dim]
-            gt_embs = torch.stack([emb1, emb2], dim=1)  # [B, 2, emb_dim]
-        
-        loss_dict = self.cosine_loss(emb, gt_embs, Q) #{'total_loss': , 'cosine_loss': , 'ortho_loss': }
+            gt_embs = torch.stack([emb1, emb2], dim=1)    # [B, 2, emb_dim]
 
+        # 2) Shared WavLM forward  --------------------------------
+        #    (instead of calling self.forward twice)
+        if mix.dim() == 3:        # [B,1,T] -> [B,T]
+            mix_ = mix.squeeze(1)
+        else:
+            mix_ = mix
 
-        if batch_idx == 0 and self.current_epoch == 0:
-            with torch.no_grad():
-                cos_gt = F.cosine_similarity(gt_embs[:,0,:], gt_embs[:,1,:], dim=-1).mean()
-                cos_pred = F.cosine_similarity(emb[:,0,:], emb[:,1,:], dim=-1).mean()
-                print("Mean cos(gt1, gt2) =", cos_gt.item())
-                print("Mean cos(pred1, pred2) =", cos_pred.item())
+        feats = self.model.wavlm(mix_).last_hidden_state   # [B, T_frames, 768]
 
-        # self.log(
-        #     "train/loss",
-        #     loss,
-        #     on_step=True,
-        #     on_epoch=True,
-        #     prog_bar=True,
-        #     logger=True,
-        #     batch_size=mix.shape[0],
-        # )
+        # 3) Teacher-queries branch (supervised)
+        emb_teacher, Q_t = self.model.mhqp(
+            feats,
+            return_queries=True,
+            teacher_embs=gt_embs,      # [B,2,emb_dim]
+        )                              # emb_teacher: [B,2,emb_dim], Q_t: [B,H,2,Hd]
+
+        # 4) Student-queries branch (learned global queries)
+        emb_student, Q_s = self.model.mhqp(
+            feats,
+            return_queries=True,
+            teacher_embs=None,
+        )                              # emb_student: [B,2,emb_dim], Q_s: [B,H,2,Hd]
+
+        # 5) Loss
+        loss_dict = self.cosine_loss(
+            pred_student=emb_student,
+            pred_teacher=emb_teacher,
+            teacher_embs=gt_embs,
+            Q_student=Q_s,
+            Q_teacher=Q_t,
+        )
+
         for k, v in loss_dict.items():
             self.log(
                 f"train/{k}",
-                v,
+                v.detach(),
                 on_step=True,
                 on_epoch=True,
                 prog_bar=True,
                 logger=True,
                 batch_size=mix.shape[0],
             )
-        return loss_dict['total_loss']
+        return loss_dict["total_loss"]
 
     # -----------------------------
     # VALIDATION (per-batch)
@@ -145,20 +158,23 @@ class MySpEmb(pl.LightningModule):
         self.val_labels = []
 
     def validation_step(self, batch, batch_idx):
-        """
-        For now we just compute arcface loss as a simple val loss.
-        The clustering metrics are done in validation_epoch_end
-        on the entire validation set.
-        """
         mix, source, labels = batch
-        emb, Q = self.forward(mix, return_queries=True)                   # [B, 2, emb_dim]
-        #labels : [B, 2]
+
+        # Shared WavLM forward
+        if mix.dim() == 3:
+            mix_ = mix.squeeze(1)
+        else:
+            mix_ = mix
+
+        feats = self.model.wavlm(mix_).last_hidden_state   # [B, T, 768]
+
+        # Student path only
+        emb, Q = self.model.mhqp(feats, return_queries=True, teacher_embs=None)
 
         self.val_embs.append(emb.detach().cpu())
         self.val_labels.append(labels.detach().cpu())
 
-
-        return {'emb': emb, 'labels': labels}
+        return {"emb": emb, "labels": labels}
 
     # -----------------------------
     # VALIDATION (end of epoch)
@@ -249,10 +265,10 @@ if __name__ == "__main__":
 
     wandb_logger = WandbLogger(
         project="librispeech-speaker-encoder",
-        name="FT_wavlm_asp_dual_embedding-query_orthogonality_mhqa",
+        name="ft_wavlm_teacher_student_emb_distillation",
         # name='test_run',
         log_model=False,
-        save_dir="/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_ft_dualemb_queryorthogonality_mhqa/wandb_logs",
+        save_dir="/mnt/disks/data/model_ckpts/librispeech_asp_ft_wavlm_teacher_student_emb_distillation/wandb_logs",
     )
 
     ckpt = pl.callbacks.ModelCheckpoint(
@@ -260,7 +276,7 @@ if __name__ == "__main__":
         mode="min",
         save_top_k=10,
         filename="best-{epoch}-{val_separation:.3f}",
-        dirpath="/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_ft_dualemb_queryorthogonality_mhqa/"
+        dirpath="/mnt/disks/data/model_ckpts/librispeech_asp_ft_wavlm_teacher_student_emb_distillation/"
     )
 
     trainer = pl.Trainer(

@@ -22,6 +22,8 @@ class MultiHeadQueryPooling(nn.Module):
 
         self.out_proj = nn.Linear(input_dim, output_dim)
 
+        self.teacher_to_query = nn.Linear(output_dim, self.head_dim)
+
         self._reset_parameters()
     
     def _reset_parameters(self):
@@ -30,7 +32,7 @@ class MultiHeadQueryPooling(nn.Module):
         nn.init.xavier_uniform_(self.value_proj.weight)
         nn.init.xavier_uniform_(self.out_proj.weight)
 
-    def forward(self, x, return_queries=False):
+    def forward(self, x, return_queries=False, teacher_embs=None):
         """
         x: [B, T, D=768]
         Returns:
@@ -48,7 +50,15 @@ class MultiHeadQueryPooling(nn.Module):
         V = V.permute(0,2,1,3)  # [B, nH, T, HD]
 
         #prepare queries
-        Q = self.queries.expand(B, -1, -1, -1)  # [B, nH, nQ, HD]
+        if teacher_embs is not None:
+            #teacher_embs : [B, 2, 256]
+            projected_teacher = self.teacher_to_query(teacher_embs)  # [B,2,Hd]
+            Q = projected_teacher.unsqueeze(1).repeat(1,self.num_heads,1,1)  # [B,H,2,Hd]
+
+        else:   
+            Q = self.queries.expand(B, -1, -1, -1)  # [B, nH, nQ, HD]
+
+
 
         #calculte attention scores
         scores = torch.einsum('bhqd, bhdt -> bhqt', Q, K.transpose(-1, -2)) / (self.head_dim ** 0.5)  # [B, nH, nQ, T]
@@ -67,7 +77,7 @@ class MultiHeadQueryPooling(nn.Module):
         emb = self.out_proj(emb)  # [B, nQ, output_dim]
         
         if return_queries:
-            return emb, self.queries
+            return emb, Q
 
         return emb
 
@@ -124,7 +134,7 @@ class SpeakerEncoderDualWrapper(nn.Module):
         # Multi-head query pooling to get 2 streams
         self.mhqp = MultiHeadQueryPooling(input_dim=self.wavlm_out, output_dim = self.emb_dim, num_queries=2, num_heads=4)
 
-    def forward(self, audio, return_queries=False):
+    def forward(self, audio, return_queries=False, teacher_embs=None):
         """
         mix_audio: [B, T]
         """
@@ -136,10 +146,10 @@ class SpeakerEncoderDualWrapper(nn.Module):
 
         #multi-head query pooling to get 2 streams
         if return_queries:
-            emb, Q = self.mhqp(feats, return_queries=True)
+            emb, Q = self.mhqp(feats, return_queries=True, teacher_embs=teacher_embs)
             return emb, Q
 
-        emb = self.mhqp(feats)  # [B, 2, emb_dim]
+        emb = self.mhqp(feats, teacher_embs=teacher_embs)  # [B, 2, emb_dim]
         
 
         return emb
