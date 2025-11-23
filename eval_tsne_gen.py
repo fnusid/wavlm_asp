@@ -298,11 +298,12 @@ def plot_tsne(embs, speakers, contrast_stats, save_path):
 
 if __name__ == "__main__":
 
-    META = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/Libri2Mix/wav16k/min/metadata/mixture_dev_mix_clean.csv"
-    CKPT = "/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_ft_dualemb_queryorthogonality_mhqa/best-epoch=10-val_separation=0.000.ckpt"
+    #META = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/Libri2Mix/wav16k/min/metadata/mixture_dev_mix_clean.csv" #dev
+    META= "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/Libri2Mix/wav16k/min/metadata/mixture_train-100_mix_clean.csv"
+    CKPT = "/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_ft_dualemb_queryorthogonality_mhqa/best-epoch=54-val_separation=0.000.ckpt"
     SPEAKER_TXT = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/LibriSpeech/SPEAKERS.TXT"
 
-    SAVE_TSNE = "/home/sidharth./codebase/wavlm_dual_embedding/analysis/tsne/tsne_dual_dev_seed44_queryorthogonal_mhqa_ft_with_gendercontrast.png"
+    SAVE_TSNE = "/home/sidharth./codebase/wavlm_dual_embedding/analysis/tsne/tsne_dual_train_seed44_queryorthogonal_mhqa_ft_with_gendercontrast_1_overlap.png"
 
     # ------ Load everything ------
     metadata = parse_metadata(META)
