@@ -16,12 +16,12 @@ class LossWraper(nn.Module):
         
 
 
-    def forward(self, pred, gt):
+    def forward(self, pred, gt, Q):
         """
         pred: [B, 2, D]
         gt:   [B, 2, D]
         """
-        loss = self.loss_fn(pred, gt)
+        loss = self.loss_fn(pred, gt, Q)
         return loss
 
 
@@ -29,7 +29,7 @@ class CosineSimilarityLoss(nn.Module):
     def __init__(self):
         super().__init__()
 
-    def forward(self, pred, gt):
+    def forward(self, pred, gt, Q):
         """
         pred: [B, 2, D]
         gt:   [B, 2, D]
@@ -61,12 +61,27 @@ class CosineSimilarityLoss(nn.Module):
             cosine_loss += loss_b
 
         #orthogonality in the predicted embeddings
-        pred1 = pred[:,0,:]  # [B,D]
-        pred2 = pred[:,1,:]  # [B,D]
-        ortho_cos = F.cosine_similarity(pred1, pred2, dim=-1)
+        # pred1 = pred[:,0,:]  # [B,D]
+        # pred2 = pred[:,1,:]  # [B,D]
+        # ortho_cos = F.cosine_similarity(pred1, pred2, dim=-1)
         
-        ortho_loss = torch.clamp(ortho_cos, min=0.0).mean()  # only penalize positive cosine similarity
-        loss_total = (cosine_loss / batch_size) + ortho_loss
+        # ortho_loss = torch.clamp(ortho_cos, min=0.0).mean()  # only penalize positive cosine similarity
+        # loss_total = (cosine_loss / batch_size) + ortho_loss
+
+
+        ## orthogonal on queries not embeddings
+        Q = Q.squeeze(0)       # [H,Q,Hd]
+        q = F.normalize(Q, dim=-1)
+
+        sim = torch.einsum("hqd,hpd->hqp", q, q)  # [H,Q,Q]
+
+        H, Qn, _ = sim.shape
+        I = torch.eye(Qn, device=sim.device).unsqueeze(0).expand(H, -1, -1)
+
+        ortho_loss = ((sim - I) ** 2).mean()
+
+
+        loss_total = (cosine_loss / batch_size) + 0.1*ortho_loss
 
         return {'total_loss': loss_total, 'cosine_loss': cosine_loss / batch_size, 'ortho_loss': ortho_loss}
 

@@ -77,12 +77,15 @@ class MySpEmb(pl.LightningModule):
         # -----------------------------
         self.metrics = EmbeddingMetrics(device="cuda")  # will overwrite device at runtime
 
-    def forward(self, wav):
+    def forward(self, wav, return_queries=False):
         """
         wav: [B, T] (or [B, 1, T])
         returns: [B, 2, emb_dim]
         """
-        return self.model(wav)
+        if return_queries:
+            emb, Q = self.model(wav, return_queries)
+            return emb, Q
+        return self.model(wav, return_queries)
 
     # -----------------------------
     # TRAINING
@@ -94,14 +97,15 @@ class MySpEmb(pl.LightningModule):
           labels: [B, 2]  (speaker IDs, already mapped to [0..num_classes-1])
         """
         mix, source, labels = batch
-        emb = self.forward(mix)                    # [B, 2, emb_dim]
+        
+        emb, Q = self.forward(mix, return_queries=True)                    # [B, 2, emb_dim]
         #change here
         with torch.no_grad():
             emb1 = self.single_sp_model(source[:, 0, :])  # [B, emb_dim]
             emb2 = self.single_sp_model(source[:, 1, :])  # [B, emb_dim]
             gt_embs = torch.stack([emb1, emb2], dim=1)  # [B, 2, emb_dim]
         
-        loss_dict = self.cosine_loss(emb, gt_embs) #{'total_loss': , 'cosine_loss': , 'ortho_loss': }
+        loss_dict = self.cosine_loss(emb, gt_embs, Q) #{'total_loss': , 'cosine_loss': , 'ortho_loss': }
 
 
         if batch_idx == 0 and self.current_epoch == 0:
@@ -147,7 +151,7 @@ class MySpEmb(pl.LightningModule):
         on the entire validation set.
         """
         mix, source, labels = batch
-        emb = self.forward(mix)                   # [B, 2, emb_dim]
+        emb, Q = self.forward(mix, return_queries=True)                   # [B, 2, emb_dim]
         #labels : [B, 2]
 
         self.val_embs.append(emb.detach().cpu())
@@ -245,10 +249,10 @@ if __name__ == "__main__":
 
     wandb_logger = WandbLogger(
         project="librispeech-speaker-encoder",
-        name="wavlm_asp_dual_embedding-orthogonality_mhqa",
+        name="FT_wavlm_asp_dual_embedding-query_orthogonality_mhqa",
         # name='test_run',
         log_model=False,
-        save_dir="/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_ft_dualemb_orthogonality_mhqa/wandb_logs",
+        save_dir="/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_ft_dualemb_queryorthogonality_mhqa/wandb_logs",
     )
 
     ckpt = pl.callbacks.ModelCheckpoint(
@@ -256,7 +260,7 @@ if __name__ == "__main__":
         mode="min",
         save_top_k=10,
         filename="best-{epoch}-{val_separation:.3f}",
-        dirpath="/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_ft_dualemb_orthogonality_mhqa/"
+        dirpath="/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_ft_dualemb_queryorthogonality_mhqa/"
     )
 
     trainer = pl.Trainer(

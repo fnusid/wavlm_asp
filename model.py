@@ -30,7 +30,7 @@ class MultiHeadQueryPooling(nn.Module):
         nn.init.xavier_uniform_(self.value_proj.weight)
         nn.init.xavier_uniform_(self.out_proj.weight)
 
-    def forward(self, x):
+    def forward(self, x, return_queries=False):
         """
         x: [B, T, D=768]
         Returns:
@@ -52,14 +52,22 @@ class MultiHeadQueryPooling(nn.Module):
 
         #calculte attention scores
         scores = torch.einsum('bhqd, bhdt -> bhqt', Q, K.transpose(-1, -2)) / (self.head_dim ** 0.5)  # [B, nH, nQ, T]
-        attn_weights = F.softmax(scores, dim=-1)  # [B, nH, nQ, T]
+        # attn_weights = F.softmax(scores, dim=-1)  # [B, nH, nQ, T]
+        #normalize across query dimension
+        attn_weights = F.softmax(scores, dim=-2) #[B, nH, nQ, T]
+
+        #optionally time as well
+        attn_q = attn_weights / (attn_weights.sum(dim=-1, keepdim=True) + 1e-6)
 
         #Aggregate values
 
-        emb_heads = torch.einsum('bhqt, bhtd -> bhqd', attn_weights, V)  # [B, nH, nQ, HD]
+        emb_heads = torch.einsum('bhqt, bhtd -> bhqd', attn_q, V)  # [B, nH, nQ, HD]
 
         emb = emb_heads.permute(0,2,1,3).reshape(B, self.num_queries, D)  # [B, nQ, D]
         emb = self.out_proj(emb)  # [B, nQ, output_dim]
+        
+        if return_queries:
+            return emb, self.queries
 
         return emb
 
@@ -116,7 +124,7 @@ class SpeakerEncoderDualWrapper(nn.Module):
         # Multi-head query pooling to get 2 streams
         self.mhqp = MultiHeadQueryPooling(input_dim=self.wavlm_out, output_dim = self.emb_dim, num_queries=2, num_heads=4)
 
-    def forward(self, audio):
+    def forward(self, audio, return_queries=False):
         """
         mix_audio: [B, T]
         """
@@ -127,6 +135,10 @@ class SpeakerEncoderDualWrapper(nn.Module):
         feats = self.wavlm(audio).last_hidden_state   # [B, T, 768]
 
         #multi-head query pooling to get 2 streams
+        if return_queries:
+            emb, Q = self.mhqp(feats, return_queries=True)
+            return emb, Q
+
         emb = self.mhqp(feats)  # [B, 2, emb_dim]
         
 
