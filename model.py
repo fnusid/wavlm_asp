@@ -54,10 +54,10 @@ class MultiHeadQueryPooling(nn.Module):
         scores = torch.einsum('bhqd, bhdt -> bhqt', Q, K.transpose(-1, -2)) / (self.head_dim ** 0.5)  # [B, nH, nQ, T]
         # attn_weights = F.softmax(scores, dim=-1)  # [B, nH, nQ, T]
         #normalize across query dimension
-        attn_weights = F.softmax(scores, dim=-2) #[B, nH, nQ, T]
-
+        attn_weights = F.softmax(scores, dim=-1) #[B, nH, nQ, T]
+        
         #optionally time as well
-        attn_q = attn_weights / (attn_weights.sum(dim=-1, keepdim=True) + 1e-6)
+        attn_q = attn_weights / (attn_weights.sum(dim=-2, keepdim=True) + 1e-6)
 
         #Aggregate values
 
@@ -67,7 +67,7 @@ class MultiHeadQueryPooling(nn.Module):
         emb = self.out_proj(emb)  # [B, nQ, output_dim]
         
         if return_queries:
-            return emb, self.queries
+            return emb, self.queries, attn_q
 
         return emb
 
@@ -136,8 +136,8 @@ class SpeakerEncoderDualWrapper(nn.Module):
 
         #multi-head query pooling to get 2 streams
         if return_queries:
-            emb, Q = self.mhqp(feats, return_queries=True)
-            return emb, Q
+            emb, Q, attn_scores  = self.mhqp(feats, return_queries=True)
+            return emb, Q, attn_scores
 
         emb = self.mhqp(feats)  # [B, 2, emb_dim]
         

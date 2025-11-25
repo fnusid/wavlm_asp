@@ -208,9 +208,10 @@ def plot_tsne(embs, labels, save_path):
 # -------------------------------------------------
 if __name__ == "__main__":
 
-    META = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/Libri2Mix/wav16k/min/metadata/mixture_dev_mix_clean.csv"
+    # META = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/Libri2Mix/wav16k/min/metadata/mixture_dev_mix_clean.csv"
+    META="/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/Libri2Mix/wav16k/min/metadata/mixture_train-100_mix_clean.csv"
     CKPT = "/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_ft_dualemb_orthogonality_mhqa/best-epoch=29-val_separation=0.000.ckpt"
-    SAVE = "/home/sidharth./codebase/wavlm_dual_embedding/analysis/tsne/tsne_dual_dev_seed44_orthogonal_mhqa_ft.png"
+    SAVE = "/home/sidharth./codebase/wavlm_dual_embedding/analysis/tsne/tsne_dual_train_seed44_orthogonal_mhqa_ft.png"
 
     # Load metadata
     metadata = parse_metadata(META)
