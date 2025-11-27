@@ -28,7 +28,7 @@ class MySpEmb(pl.LightningModule):
         lr: float = 1e-4,
         finetune_encoder: bool = False,
         emb_dim: int = 256,
-        speaker_map_path: str = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/LibriSpeech/train-100_mapping.json",
+        speaker_map_path: str = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/Libriuni_03_08/Libri2Mix_ovl30to80/wav16k/min/metadata/train360_mapping.json",
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -52,7 +52,7 @@ class MySpEmb(pl.LightningModule):
         self.cosine_loss = LossWraper()
         #Get the teacher model
         self.single_sp_model = SingleSpeakerEncoderWrapper(emb_dim=emb_dim)
-        teacher_ckpt_path = "/mnt/disks/data/model_ckpts/librispeech_asp_wavlm/best-epoch=47-val_separation=0.000.ckpt"
+        teacher_ckpt_path = "/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_tr360/best-epoch=62-val_separation=0.000.ckpt"
 
         ckpt = torch.load(teacher_ckpt_path, map_location="cpu")
         state = ckpt["state_dict"]
@@ -230,12 +230,12 @@ class MySpEmb(pl.LightningModule):
 # ---------------------------------------
 if __name__ == "__main__":
     DATA_ROOT = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix" 
-    SPEAKER_MAP = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/Libri2Mix/wav16k/min/metadata/train100_mapping.json"
+    SPEAKER_MAP = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/Libriuni_05_08/Libri2Mix_ovl50to80/wav16k/min/metadata/train360_mapping.json"
 
     dm = LibriMixDataModule(
         data_root=DATA_ROOT,
         speaker_map_path=SPEAKER_MAP,
-        batch_size=16, 
+        batch_size=32, 
         num_workers=20, # Set this to your preference
         num_speakers=2
     )
@@ -249,25 +249,25 @@ if __name__ == "__main__":
 
     wandb_logger = WandbLogger(
         project="librispeech-speaker-encoder",
-        name="FT_wavlm_asp_dual_embedding-query_orthogonality_mhqa",
+        name="FT_wavlm_asp_dual_embedding-query_orthogonality_mhqa_lib2mix_tr360_tr_whtr_valwhamtt",
         # name='test_run',
         log_model=False,
-        save_dir="/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_ft_dualemb_queryorthogonality_mhqa/wandb_logs",
+        save_dir="/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_ft_dualemb_queryorthogonality_mhqa_lib2mix_tr360_tr_whtr_valwhamtt/wandb_logs",
     )
 
     ckpt = pl.callbacks.ModelCheckpoint(
         monitor="train/total_loss",
         mode="min",
-        save_top_k=10,
+        save_top_k=1,
         filename="best-{epoch}-{val_separation:.3f}",
-        dirpath="/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_ft_dualemb_queryorthogonality_mhqa/"
+        dirpath="/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_ft_dualemb_queryorthogonality_mhqa_lib2mix_tr360_tr_whtr_valwhamtt/"
     )
 
     trainer = pl.Trainer(
         strategy="ddp_find_unused_parameters_true",
         accelerator="gpu",
-        devices=[0, 1],
-        max_epochs=400,
+        devices=[0, 1, 2, 3],
+        max_epochs=150,
         logger=wandb_logger,
         callbacks=[ckpt],
         gradient_clip_val=5.0,

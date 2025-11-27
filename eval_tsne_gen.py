@@ -3,6 +3,8 @@ import json
 import random
 import torch
 import torchaudio
+import torch.nn 
+import torch.nn.functional as F
 import matplotlib.pyplot as plt
 from sklearn.manifold import TSNE
 import numpy as np
@@ -10,6 +12,35 @@ import numpy as np
 from model import SpeakerEncoderDualWrapper   # your dual model
 
 random.seed(44)
+noise_dir = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/wham_noise/tt"  
+noise_files = [os.path.join(noise_dir, f) for f in os.listdir(noise_dir) if f.endswith(".wav")]
+add_noise=False
+
+def mix_with_snr(clean, noise, snr_db):
+    """
+    clean, noise: torch tensors [T]
+    snr_db: desired SNR = clean_power / noise_power (in dB)
+    """
+    # match lengths
+   
+    if noise.ndim > 1:
+        noise = noise.mean(0)
+    if len(noise) < len(clean):
+        diff = len(clean) - len(noise)
+        padded_noise = F.pad(noise, (diff//2, diff - (diff//2)))
+        noise = padded_noise
+    else:
+        noise = noise[:len(clean)]
+
+    # compute powers
+    clean_power = clean.pow(2).mean()
+    noise_power  = noise.pow(2).mean()
+
+    # scaling for noise to achieve target SNR
+    target_noise_power = clean_power / (10 ** (snr_db / 10))
+    scale = torch.sqrt(target_noise_power / (noise_power + 1e-8))
+
+    return clean + scale * noise
 
 # =====================================================================
 # 1) Clean dual-model weight loading
@@ -52,16 +83,25 @@ def load_dual_model(ckpt_path, emb_dim=256, device="cuda"):
 
 def parse_metadata(csv_path):
     metadata = []
+
     with open(csv_path, "r") as f:
         header = next(f)
 
         for line in f:
             parts = line.strip().split(",")
+            if csv_path.split('/')[-1].split('_')[-1] == 'both.csv':
+                if len(parts) != 8: #add noise in header
+                    continue
+                else:
+                    mix_id, mix_path, src1, src2, spk1, spk2, noise, length = parts #mix id, mix_path,source_1_path,speaker_1_ID,source_2_path,speaker_2_ID,noise_path,length
 
-            if len(parts) != 7:
-                continue
+            else:
+                if len(parts) != 7:
+                    continue
+                else:
 
-            mix_id, mix_path, src1, src2, spk1, spk2, length = parts
+
+                    mix_id, mix_path, src1, src2, spk1, spk2, length = parts #mixture_ID,mixture_path,source_1_path,source_2_path,speaker_1_ID,speaker_2_ID,length
 
             if spk1 == "speaker_1_ID":
                 continue
@@ -114,14 +154,14 @@ def parse_speaker_gender(speaker_txt_path):
 def select_speakers(metadata, min_mixtures=20, num_speakers=4):
 
     speaker_to_mixfiles = {}
-
+    
     for entry in metadata:
         mix = entry["mix_path"]
         s1, s2 = entry["spk1"], entry["spk2"]
 
         speaker_to_mixfiles.setdefault(s1, []).append(mix)
         speaker_to_mixfiles.setdefault(s2, []).append(mix)
-
+    
     valid = {s: m for s, m in speaker_to_mixfiles.items() if len(m) >= min_mixtures}
 
     if len(valid) < num_speakers:
@@ -154,6 +194,18 @@ def extract_dual_embeddings(model, speaker_files, gender_map, max_per_spk=40, de
 
             wav, sr = torchaudio.load(mix_path)
             wav = wav.mean(0)
+            if add_noise:
+                noise_p = random.choice(noise_files)
+                noise_wav, n_sr = torchaudio.load(noise_p)
+                r = random.random()
+                if r < 0.4:
+                    snr = random.uniform(-5, 5)
+                elif r < 0.8:
+                    snr = random.uniform(5, 15)
+                else:
+                    snr = random.uniform(15, 25)
+                wav = mix_with_snr(wav, noise_wav, snr)
+              
             wav = wav.to(device).unsqueeze(0)
 
             with torch.no_grad():
@@ -299,11 +351,11 @@ def plot_tsne(embs, speakers, contrast_stats, save_path):
 if __name__ == "__main__":
 
     #META = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/Libri2Mix/wav16k/min/metadata/mixture_dev_mix_clean.csv" #dev
-    META= "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/Libri2Mix/wav16k/min/metadata/mixture_train-100_mix_clean.csv"
-    CKPT = "/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_ft_dualemb_queryorthogonality_mhqa/best-epoch=54-val_separation=0.000.ckpt"
+    META= "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/Libriuni_05_08/Libri2Mix_ovl50to80/wav16k/min/metadata/mixture_train-360_mix_both.csv"
+    CKPT = "/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_ft_dualemb_queryorthogonality_mhqa_lib2mix_tr360_trfs_valwham/best-epoch=50-val_separation=0.000.ckpt"
     SPEAKER_TXT = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/LibriSpeech/SPEAKERS.TXT"
 
-    SAVE_TSNE = "/home/sidharth./codebase/wavlm_dual_embedding/analysis/tsne/tsne_dual_train_seed44_queryorthogonal_mhqa_ft_with_gendercontrast_1_overlap.png"
+    SAVE_TSNE = "/home/sidharth./codebase/wavlm_dual_embedding/analysis/tsne/tsne_dual_train_mixboth_seed44_queryorthogonal_mhqa_ft_with_overlap_05_08_trained360.png"
 
     # ------ Load everything ------
     metadata = parse_metadata(META)
