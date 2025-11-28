@@ -20,6 +20,8 @@ sys.path.append("/home/sidharth./codebase/")
 from wavlm_single_embedding.model import SpeakerEncoderWrapper as SingleSpeakerEncoderWrapper
 import random
 random.seed(42)
+import warnings
+warnings.filterwarnings("ignore")
 
 def strip_model_prefix(state):
     new_state = {}
@@ -36,7 +38,7 @@ class MySpEmb(pl.LightningModule):
         lr: float = 1e-4,
         finetune_encoder: bool = False,
         emb_dim: int = 256,
-        speaker_map_path: str = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/LibriSpeech/train-100_mapping.json",
+        speaker_map_path: str = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/Libriuni_03_08/Libri2Mix_ovl30to80/wav16k/min/metadata/train360_mapping.json",
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -44,11 +46,11 @@ class MySpEmb(pl.LightningModule):
         # -----------------------------
         # 1. Speaker Encoder model
         # -----------------------------
-        self.model = SpeakerEncoderDualWrapper(emb_dim=emb_dim)
+        self.model = SpeakerEncoderDualWrapper(emb_dim=emb_dim, finetune_wavlm=True)
 
         # Optionally unfreeze wavlm if finetuning
-        if finetune_encoder:
-            self.model.wavlm.requires_grad_(True)
+        # if finetune_encoder:
+        #     self.model.wavlm.requires_grad_(True)
 
         # -----------------------------
         # 2. ArcFace classification head
@@ -60,7 +62,7 @@ class MySpEmb(pl.LightningModule):
         self.cosine_loss = LossWraper()
         #Get the teacher model
         self.single_sp_model = SingleSpeakerEncoderWrapper(emb_dim=emb_dim)
-        teacher_ckpt_path = "/mnt/disks/data/model_ckpts/librispeech_asp_wavlm/best-epoch=47-val_separation=0.000.ckpt"
+        teacher_ckpt_path = "/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_tr360/best-epoch=62-val_separation=0.000.ckpt"
 
         ckpt = torch.load(teacher_ckpt_path, map_location="cpu")
         state = ckpt["state_dict"]
@@ -222,7 +224,8 @@ class MySpEmb(pl.LightningModule):
 # ---------------------------------------
 if __name__ == "__main__":
     DATA_ROOT = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix" 
-    SPEAKER_MAP = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/Libri2Mix/wav16k/min/metadata/train100_mapping.json"
+    SPEAKER_MAP = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/Libriuni_05_08/Libri2Mix_ovl50to80/wav16k/min/metadata/train360_mapping.json"
+
 
     dm = LibriMixDataModule(
         data_root=DATA_ROOT,
@@ -241,25 +244,25 @@ if __name__ == "__main__":
 
     wandb_logger = WandbLogger(
         project="librispeech-speaker-encoder",
-        name="wavlm_asp_dual_embedding",
+        name="ft_wavlm_linear_dualemb_tr360",
         # name='test_run',
         log_model=False,
-        save_dir="/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_dualemb/wandb_logs",
+        save_dir="/mnt/disks/data/model_ckpts/librispeech_asp_ft_wavlm_linear_dualemb_tr360/wandb_logs",
     )
 
     ckpt = pl.callbacks.ModelCheckpoint(
         monitor="train/loss",
         mode="min",
-        save_top_k=10,
+        save_top_k=1,
         filename="best-{epoch}-{val_separation:.3f}",
-        dirpath="/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_dualemb/"
+        dirpath="/mnt/disks/data/model_ckpts/librispeech_asp_ft_wavlm_linear_dualemb_tr360/"
     )
 
     trainer = pl.Trainer(
         strategy="ddp_find_unused_parameters_true",
         accelerator="gpu",
-        devices=[0, 1],
-        max_epochs=500,
+        devices=[0, 1, 2, 3],
+        max_epochs=50,
         logger=wandb_logger,
         callbacks=[ckpt],
         gradient_clip_val=5.0,
