@@ -10,6 +10,9 @@ from sklearn.manifold import TSNE
 
 from model import SpeakerEncoderDualWrapper
 
+sys.path.append("/home/sidharth./codebase/")
+
+from wavlm_single_embedding.model import SpeakerEncoderWrapper as SingleSpeakerEncoderWrapper
 # ============================================================
 # Helpers
 # ============================================================
