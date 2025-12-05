@@ -26,7 +26,7 @@ from wavlm_single_embedding.model import SpeakerEncoderWrapper as SingleSpkEncod
 # -----------------------------
 # Global noise config
 # -----------------------------
-add_noise = True  # set True to enable noise corruption
+add_noise = False  # set True to enable noise corruption
 noise_dir = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/wham_noise/tt"
 noise_files = [
     os.path.join(noise_dir, f)
@@ -328,9 +328,9 @@ def plot_tsne_subset(embs, labels, num_speakers=4, save_path="tsne_subset.png"):
 if __name__ == "__main__":
     META = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/Libri2Mix/wav16k/min/metadata/mixture_dev_mix_clean.csv"
     # CKPT = "/mnt/disks/data/model_ckpts/librispeech_asp_ft_wavlm_linear_dualemb_tr360/best-epoch=49-val_separation=0.000.ckpt"
-    CKPT = "/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_dualemb/best-epoch=50-val_separation=0.000.ckpt" # WITHOUT FINE-TUNING WAVLM LAST 6 LAYERS
+    CKPT = "/mnt/disks/data/model_ckpts/librispeech_asp_NOft_wavlm_linear_dualemb_tr360/best-epoch=47-val_separation=0.000.ckpt" # WITHOUT FINE-TUNING WAVLM LAST 6 LAYERS
     TEACHER_CKPT = "/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_tr360/best-epoch=62-val_separation=0.000.ckpt"
-    TSNE_SAVE_PATH = "/home/sidharth./codebase/wavlm_dual_embedding/analysis/tsne_new/dual_devclean_whamtt_subset_tsne_linearasp.png"
+    TSNE_SAVE_PATH = "/home/sidharth./codebase/wavlm_dual_embedding/analysis/tsne_new/dual_devclean_subset_tsne_linearasp_without_ft_tr360.png"
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print("Using device:", device)

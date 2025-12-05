@@ -46,7 +46,7 @@ class MySpEmb(pl.LightningModule):
         # -----------------------------
         # 1. Speaker Encoder model
         # -----------------------------
-        self.model = SpeakerEncoderDualWrapper(emb_dim=emb_dim, finetune_wavlm=True)
+        self.model = SpeakerEncoderDualWrapper(emb_dim=emb_dim, finetune_wavlm=False)
 
         # Optionally unfreeze wavlm if finetuning
         # if finetune_encoder:
@@ -244,10 +244,10 @@ if __name__ == "__main__":
 
     wandb_logger = WandbLogger(
         project="librispeech-speaker-encoder",
-        name="ft_wavlm_linear_dualemb_tr360",
+        name="NOft_wavlm_linear_dualemb_tr360",
         # name='test_run',
         log_model=False,
-        save_dir="/mnt/disks/data/model_ckpts/librispeech_asp_ft_wavlm_linear_dualemb_tr360/wandb_logs",
+        save_dir="/mnt/disks/data/model_ckpts/librispeech_asp_NOft_wavlm_linear_dualemb_tr360/wandb_logs",
     )
 
     ckpt = pl.callbacks.ModelCheckpoint(
@@ -255,7 +255,7 @@ if __name__ == "__main__":
         mode="min",
         save_top_k=1,
         filename="best-{epoch}-{val_separation:.3f}",
-        dirpath="/mnt/disks/data/model_ckpts/librispeech_asp_ft_wavlm_linear_dualemb_tr360/"
+        dirpath="/mnt/disks/data/model_ckpts/librispeech_asp_NOft_wavlm_linear_dualemb_tr360/"
     )
 
     trainer = pl.Trainer(
