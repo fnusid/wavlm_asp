@@ -22,7 +22,8 @@ class MySpEmb(pl.LightningModule):
         lr: float = 1e-4,
         finetune_encoder: bool = False,
         emb_dim: int = 256,
-        speaker_map_path: str = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/LibriSpeech/train-100_mapping.json",
+        # speaker_map_path: str = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/LibriSpeech/train-100_mapping.json",
+        speaker_map_path: str = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/LibriSpeech/train-360_mapping.json"
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -75,7 +76,7 @@ class MySpEmb(pl.LightningModule):
         loss = self.arcface_loss(emb, labels)      # scalar
 
         self.log(
-            "train/loss",
+            "train/total_loss",
             loss,
             on_step=True,
             on_epoch=True,
@@ -153,7 +154,7 @@ class MySpEmb(pl.LightningModule):
         # monitor one of the embedding metrics, e.g., separation (higher is better)
         scheduler = ReduceLROnPlateau(
             optimizer,
-            mode="max",
+            mode="min",
             factor=0.5,
             patience=3,
         )
@@ -162,7 +163,7 @@ class MySpEmb(pl.LightningModule):
             "optimizer": optimizer,
             "lr_scheduler": {
                 "scheduler": scheduler,
-                "monitor": "train/loss",
+                "monitor": "train/total_loss",
                 "frequency": 1,
                 "interval": "epoch",
             },
@@ -175,7 +176,7 @@ class MySpEmb(pl.LightningModule):
 if __name__ == "__main__":
     DATA_ROOT = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/LibriSpeech"
 
-    TRAIN_SPK_MAP = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/LibriSpeech/train-100_mapping.json"
+    TRAIN_SPK_MAP = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/LibriSpeech/train-360_mapping.json"
 
     dm = LibriDataModule(
         data_root=DATA_ROOT,
@@ -195,25 +196,27 @@ if __name__ == "__main__":
 
     wandb_logger = WandbLogger(
         project="librispeech-speaker-encoder",
-        name="wavlm_asp_arcface",
+        name="wavlm_asp_arcface_tr360",
         # name='test_run',
         log_model=False,
         save_dir="/mnt/disks/data/model_ckpts/librispeech_asp_wavlm/wandb_logs",
     )
 
     ckpt = pl.callbacks.ModelCheckpoint(
-        monitor="train/loss",
-        mode="max",
+        monitor="train/total_loss",
+        mode="min",
         save_top_k=10,
         filename="best-{epoch}-{val_separation:.3f}",
-        dirpath="/mnt/disks/data/model_ckpts/librispeech_asp_wavlm/"
+        dirpath="/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_tr360/"
     )
 
     trainer = pl.Trainer(
         strategy="ddp_find_unused_parameters_true",
+        
         accelerator="gpu",
-        devices=[0, 1],
-        max_epochs=1000,
+
+        devices=[0, 1, 2, 3],
+        max_epochs=500,
         logger=wandb_logger,
         callbacks=[ckpt],
         gradient_clip_val=5.0,

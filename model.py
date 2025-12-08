@@ -5,6 +5,11 @@ from transformers import WavLMModel, WavLMConfig
 from speechbrain.lobes.models.ECAPA_TDNN import AttentiveStatisticsPooling
 
 
+
+
+
+
+
 class SpeakerEncoder(nn.Module):
     def __init__(self, feat_dim, emb_dim=256):
         super().__init__()

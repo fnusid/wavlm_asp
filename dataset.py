@@ -11,6 +11,7 @@ import random
 
 '''
 /mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/LibriSpeech/train-100_mapping.json
+/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/LibriSpeech/train-360_mapping.json
 '''
 
 class Librispeech(Dataset):
@@ -98,7 +99,8 @@ class LibriDataModule(pl.LightningDataModule):
     def setup(self, stage=None):
 
 
-        train_meta = os.path.join(self.data_root, "libri_train100.txt")
+        # train_meta = os.path.join(self.data_root, "libri_train100.txt")
+        train_meta = os.path.join(self.data_root, "libri_train360.txt")
         val_meta = os.path.join(self.data_root, "libri_dev_clean.txt")
 
 
