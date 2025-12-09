@@ -55,6 +55,7 @@ class SpeakerEncoderWrapper(nn.Module):
         """
         audio: [B, T]
         """
+        # breakpoint()
         if audio.dim() == 3:  # [B, 1, T]
             audio = audio.squeeze(1)
 
