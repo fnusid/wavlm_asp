@@ -10,7 +10,7 @@ from pytorch_lightning.loggers import WandbLogger
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from dataset import LibriDataModule          # <-- single-speaker Libri datamodule
-from model import SpeakerEncoderWrapper   # <-- your WavLM+ASP encoder
+from model import SpeakerEncoderWrapper, ECAPA_TDNN   # <-- your WavLM+ASP encoder
 from loss import LossWraper
 from metrics import EmbeddingMetrics
 import wandb
@@ -31,11 +31,12 @@ class MySpEmb(pl.LightningModule):
         # -----------------------------
         # 1. Speaker Encoder model
         # -----------------------------
-        self.model = SpeakerEncoderWrapper(emb_dim=emb_dim)
+        # self.model = SpeakerEncoderWrapper(emb_dim=emb_dim)
+        self.model = ECAPA_TDNN(C=1024)
 
         # Optionally unfreeze wavlm if finetuning
-        if finetune_encoder:
-            self.model.wavlm.requires_grad_(True)
+        # if finetune_encoder:
+        #     self.model.wavlm.requires_grad_(True)
 
         # -----------------------------
         # 2. ArcFace classification head
@@ -196,10 +197,10 @@ if __name__ == "__main__":
 
     wandb_logger = WandbLogger(
         project="librispeech-speaker-encoder",
-        name="wavlm_asp_arcface_tr360",
+        name="ecapa_tdnn_arcface_tr360",
         # name='test_run',
         log_model=False,
-        save_dir="/mnt/disks/data/model_ckpts/librispeech_asp_wavlm/wandb_logs",
+        save_dir="/mnt/disks/data/model_ckpts/ecapa_tdnn_arcface_tr360/wandb_logs",
     )
 
     ckpt = pl.callbacks.ModelCheckpoint(
@@ -207,7 +208,7 @@ if __name__ == "__main__":
         mode="min",
         save_top_k=10,
         filename="best-{epoch}-{val_separation:.3f}",
-        dirpath="/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_tr360/"
+        dirpath="/mnt/disks/data/model_ckpts/ecapa_tdnn_arcface_tr360/"
     )
 
     trainer = pl.Trainer(

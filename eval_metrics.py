@@ -12,10 +12,45 @@ from sklearn.metrics import (
     silhouette_score,
     roc_curve,
 )
+import random
 
-from model import SpeakerEncoderWrapper  # your single-speaker model
+from model import SpeakerEncoderWrapper, ECAPA_TDNN  # your single-speaker model
+
+add_noise = True  # set True to enable noise corruption
+noise_dir = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/wham_noise/tt"
+noise_files = [
+    os.path.join(noise_dir, f)
+    for f in os.listdir(noise_dir)
+    if f.endswith(".wav")
+]
+
+random.seed(44)
 
 
+# =====================================================================
+# 0) Utility: mix with SNR
+# =====================================================================
+def mix_with_snr(clean, noise, snr_db):
+    """
+    clean, noise: torch tensors [T]
+    snr_db: desired SNR in dB
+    """
+    if noise.ndim > 1:
+        noise = noise.mean(0)
+    noise = noise.to("cuda")
+    if len(noise) < len(clean):
+        diff = len(clean) - len(noise)
+        noise = F.pad(noise, (diff // 2, diff - diff // 2))
+    else:
+        noise = noise[: len(clean)]
+
+    clean_power = clean.pow(2).mean()
+    noise_power = noise.pow(2).mean()
+
+    target_np = clean_power / (10 ** (snr_db / 10))
+    scale = torch.sqrt(target_np / (noise_power + 1e-8))
+
+    return clean + scale * noise
 # -------------------------------------------------
 # 1. Load model
 # -------------------------------------------------
@@ -30,7 +65,8 @@ def load_model(ckpt_path, emb_dim=256, device="cuda"):
         else:
             new_state[k] = v
 
-    model = SpeakerEncoderWrapper(emb_dim=emb_dim)
+    # model = SpeakerEncoderWrapper(emb_dim=emb_dim)
+    model = ECAPA_TDNN(C=1024)
     model.load_state_dict(new_state, strict=False)
     model.to(device)
     model.eval()
@@ -58,6 +94,20 @@ def embed_utterance(model, wav_path, cache, device):
     wav, sr = torchaudio.load(wav_path)
     wav = wav.mean(dim=0)               # mono
     wav = wav.to(device).unsqueeze(0)   # [1, T]
+
+    if add_noise and noise_files:
+        noise_p = random.choice(noise_files)
+        noise_wav, _ = torchaudio.load(noise_p)
+
+        r = random.random()
+        if r < 0.4:
+            snr = random.uniform(-5, 5)
+        elif r < 0.8:
+            snr = random.uniform(5, 15)
+        else:
+            snr = random.uniform(15, 25)
+
+        wav = mix_with_snr(wav, noise_wav.squeeze(0), snr)
 
     with torch.no_grad():
         emb = model(wav)                # [1, D]
@@ -270,46 +320,46 @@ def compute_eer_from_trials(model, trial_paths1, trial_paths2, trial_labels, cac
 # -------------------------------------------------
 if __name__ == "__main__":
     # ---- EDIT THESE PATHS ----
-    METADATA_TXT = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/LibriSpeech/libri_dev_clean.txt"
-    CKPT = "/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_tr360/best-epoch=62-val_separation=0.000.ckpt"
+    METADATA_TXT = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/LibriSpeech/libri_test_clean.txt"
+    CKPT = "/mnt/disks/data/model_ckpts/ecapa_tdnn_arcface_tr360/best-epoch=30-val_separation=0.000.ckpt"
     TRIALS_CSV = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/LibriSpeech/dev_clean_sp_ver_pairs.csv"  # <-- your CSV with utt1,utt2,label
     TRIALS_CSV_VOX1 = "/mnt/disks/data/datasets/Datasets/Vox1_sp_ver/svs.txt"
 
-    # device = "cuda" if torch.cuda.is_available() else "cpu"
-    device='cpu'
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    # device='cpu'
 
     # 1) Load model
     model = load_model(CKPT, emb_dim=256, device=device)
 
-    # # 2) Load metadata list (full dev-clean)
-    # with open(METADATA_TXT, "r") as f:
-    #     metadata_paths = [x.strip() for x in f if x.strip()]
-    # print(f"Total dev-clean files: {len(metadata_paths)}")
+    # 2) Load metadata list (full dev-clean)
+    with open(METADATA_TXT, "r") as f:
+        metadata_paths = [x.strip() for x in f if x.strip()]
+    print(f"Total dev-clean files: {len(metadata_paths)}")
 
-    # # 3) Extract ALL embeddings + cache
-    # embs, labels, cache = extract_all_embeddings_from_list(model, metadata_paths, device=device)
-    # print(f"Embeddings shape: {embs.shape}, unique speakers: {len(np.unique(labels))}")
+    # 3) Extract ALL embeddings + cache
+    embs, labels, cache = extract_all_embeddings_from_list(model, metadata_paths, device=device)
+    print(f"Embeddings shape: {embs.shape}, unique speakers: {len(np.unique(labels))}")
 
-    # # 4) Separation
-    # sep, same_mean, diff_mean = compute_separation(embs, labels)
-    # print("\n=== Separation Metrics (dev-clean) ===")
-    # print(f"same_mean_cos = {same_mean:.4f}")
-    # print(f"diff_mean_cos = {diff_mean:.4f}")
-    # print(f"separation    = {sep:.4f}")
+    # 4) Separation
+    sep, same_mean, diff_mean = compute_separation(embs, labels)
+    print("\n=== Separation Metrics (test-noisy) ===")
+    print(f"same_mean_cos = {same_mean:.4f}")
+    print(f"diff_mean_cos = {diff_mean:.4f}")
+    print(f"separation    = {sep:.4f}")
 
-    # # 5) Clustering
-    # clust = compute_clustering_metrics(embs, labels)
-    # print("\n=== Clustering Metrics (dev-clean) ===")
-    # print(f"cluster_acc = {clust['cluster_acc']:.4f}")
-    # print(f"nmi         = {clust['nmi']:.4f}")
-    # print(f"ari         = {clust['ari']:.4f}")
-    # print(f"silhouette  = {clust['silhouette']:.4f}")
+    # 5) Clustering
+    clust = compute_clustering_metrics(embs, labels)
+    print("\n=== Clustering Metrics (test-noisy) ===")
+    print(f"cluster_acc = {clust['cluster_acc']:.4f}")
+    print(f"nmi         = {clust['nmi']:.4f}")
+    print(f"ari         = {clust['ari']:.4f}")
+    print(f"silhouette  = {clust['silhouette']:.4f}")
 
-    # 6) EER from your trials CSV
-    paths1, paths2, labs = load_trials_vox1_txt(TRIALS_CSV_VOX1)
-    cache={}
-    print(f"\nTotal trials loaded: {len(labs)}")
+    # # 6) EER from your trials CSV
+    # paths1, paths2, labs = load_trials_vox1_txt(TRIALS_CSV_VOX1)
+    # cache={}
+    # print(f"\nTotal trials loaded: {len(labs)}")
 
-    eer = compute_eer_from_trials(model, paths1, paths2, labs, cache, device=device)
-    print("\n=== Verification (dev-clean trials) ===")
-    print(f"EER = {eer * 100:.2f}%")
+    # eer = compute_eer_from_trials(model, paths1, paths2, labs, cache, device=device)
+    # print("\n=== Verification (dev-clean trials) ===")
+    # print(f"EER = {eer * 100:.2f}%")
