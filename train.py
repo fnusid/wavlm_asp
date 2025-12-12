@@ -104,12 +104,14 @@ class MySpEmb(pl.LightningModule):
           labels: [B, 2]  (speaker IDs, already mapped to [0..num_classes-1])
         """
         mix, source, labels = batch
-        emb = self.forward(mix)                    # [B, 2, emb_dim]
+        emb = self.forward(mix)                    # [B, 3, emb_dim]
         #change here
         with torch.no_grad():
             emb1 = self.single_sp_model(source[:, 0, :])  # [B, emb_dim]
             emb2 = self.single_sp_model(source[:, 1, :])  # [B, emb_dim]
-            gt_embs = torch.stack([emb1, emb2], dim=1)  # [B, 2, emb_dim]
+            emb3 = self.single_sp_model(source[:, 2, :]) #[B, emb_dim]       
+
+            gt_embs = torch.stack([emb1, emb2, emb3], dim=1)  # [B, 2, emb_dim]
         
         loss = self.cosine_loss(emb, gt_embs)
         if batch_idx == 0 and self.current_epoch == 0:
@@ -145,7 +147,7 @@ class MySpEmb(pl.LightningModule):
         on the entire validation set.
         """
         mix, source, labels = batch
-        emb = self.forward(mix)                   # [B, 2, emb_dim]
+        emb = self.forward(mix)                   # [B, 3, emb_dim]
         #labels : [B, 2]
 
         self.val_embs.append(emb.detach().cpu())
@@ -161,7 +163,7 @@ class MySpEmb(pl.LightningModule):
         if not self.trainer.is_global_zero:
             return
 
-        # [num_batches, B, 2, D] → [total_B, 2, D]
+        # [num_batches, B, 3, D] → [total_B, 3, D]
         val_embs = torch.cat(self.val_embs, dim=0)      # [B_total, 2, D]
         val_labels = torch.cat(self.val_labels, dim=0)  # [B_total, 2]
 
@@ -224,7 +226,7 @@ class MySpEmb(pl.LightningModule):
 # ---------------------------------------
 if __name__ == "__main__":
     DATA_ROOT = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix" 
-    SPEAKER_MAP = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/Libriuni_05_08/Libri2Mix_ovl50to80/wav16k/min/metadata/train360_mapping.json"
+    SPEAKER_MAP = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/3sp/Libri3Mix_ovl50to80/wav16k/min/metadata/train360_mapping.json"
 
 
     dm = LibriMixDataModule(
@@ -244,10 +246,10 @@ if __name__ == "__main__":
 
     wandb_logger = WandbLogger(
         project="librispeech-speaker-encoder",
-        name="ft_wavlm_linear_dualemb_tr360",
+        name="3spft_wavlm_linear_dualemb_tr360",
         # name='test_run',
         log_model=False,
-        save_dir="/mnt/disks/data/model_ckpts/librispeech_asp_ft_wavlm_linear_dualemb_tr360/wandb_logs",
+        save_dir="/mnt/disks/data/model_ckpts/librispeech_asp_3spft_wavlm_linear_dualemb_tr360/wandb_logs",
     )
 
     ckpt = pl.callbacks.ModelCheckpoint(
@@ -255,31 +257,31 @@ if __name__ == "__main__":
         mode="min",
         save_top_k=1,
         filename="best-{epoch}-{val_separation:.3f}",
-        dirpath="/mnt/disks/data/model_ckpts/librispeech_asp_ft_wavlm_linear_dualemb_tr360/"
+        dirpath="/mnt/disks/data/model_ckpts/librispeech_asp_3spft_wavlm_linear_dualemb_tr360/"
     )
 
     trainer = pl.Trainer(
         strategy="ddp_find_unused_parameters_true",
         accelerator="gpu",
         devices=[0, 1, 2, 3],
-        max_epochs=50,
+        max_epochs=80,
         logger=wandb_logger,
         callbacks=[ckpt],
         gradient_clip_val=5.0,
         enable_checkpointing=True,
     )
 
-    # trainer = pl.Trainer(
-    #     accelerator='gpu',
-    #     devices=[0],
-    #     max_epochs=100,
-    #     logger=wandb_logger,
-    #     overfit_batches=1,
-    #     limit_train_batches=1,
-    #     limit_val_batches=1,
-    #     num_sanity_val_steps=0,
-    #     enable_checkpointing=False,
-    # )
+    trainer = pl.Trainer(
+        accelerator='gpu',
+        devices=[0],
+        max_epochs=100,
+        logger=wandb_logger,
+        overfit_batches=1,
+        limit_train_batches=1,
+        limit_val_batches=1,
+        num_sanity_val_steps=0,
+        enable_checkpointing=False,
+    )
 
     # trainer = pl.Trainer(
     #     accelerator="gpu",
@@ -289,6 +291,6 @@ if __name__ == "__main__":
     #     limit_val_batches=1,
     #     num_sanity_val_steps=0,
     # )
-    trainer.fit(model, datamodule=dm)
+    # trainer.fit(model, datamodule=dm)
     # trainer.validate(model, datamodule=dm)
     wandb.finish()

@@ -18,8 +18,8 @@ class LossWraper(nn.Module):
 
     def forward(self, pred, gt):
         """
-        pred: [B, 2, D]
-        gt:   [B, 2, D]
+        pred: [B, 3, D]
+        gt:   [B, 3, D]
         """
         loss = self.loss_fn(pred, gt)
         return loss
@@ -31,14 +31,14 @@ class CosineSimilarityLoss(nn.Module):
 
     def forward(self, pred, gt):
         """
-        pred: [B, 2, D]
-        gt:   [B, 2, D]
+        pred: [B, 3, D]
+        gt:   [B, 3, D]
         """
         # Normalize
         pred = F.normalize(pred, p=2, dim=-1)   # [B,2,D]
         gt   = F.normalize(gt,   p=2, dim=-1)   # [B,2,D]
 
-        # Cosine similarity matrix: [B,2,2]
+        # Cosine similarity matrix: [B,3,3]
         cos = torch.matmul(pred, gt.transpose(1, 2))
 
         batch_size = cos.size(0)

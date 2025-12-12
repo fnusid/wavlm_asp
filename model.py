@@ -54,11 +54,12 @@ class SpeakerEncoderDualWrapper(nn.Module):
         self.emb_dim = emb_dim
 
         # Linear 768 -> 256
-        self.projector = nn.Linear(self.wavlm_out, 2*emb_dim)
+        self.projector = nn.Linear(self.wavlm_out, 3*emb_dim)
 
         # ASP-based speaker encoder
         self.encoder1 = SpeakerEncoder(feat_dim=emb_dim, emb_dim=emb_dim)
         self.encoder2 = SpeakerEncoder(feat_dim=emb_dim, emb_dim=emb_dim)
+        self.encoder3 = SpeakerEncoder(feat_dim = emb_dim, emb_dim = emb_dim)
 
     def forward(self, audio):
         """
@@ -74,17 +75,19 @@ class SpeakerEncoderDualWrapper(nn.Module):
         proj = self.projector(feats)   # [B, T, 512]
 
         # Split for dual embedding
-        proj1, proj2 = torch.chunk(proj, 2, dim=-1)  # each [B, T, 256]
+        proj1, proj2, proj3 = torch.chunk(proj, 3, dim=-1)  # each [B, T, 256]
 
 
         # ASP expects [B, D, T]
         proj1 = proj1.transpose(1, 2)    # [B, 256, T]
         proj2 = proj2.transpose(1, 2)    # [B, 256, T]
+        proj3 = proj3.transpose(1, 2)    # [B, 256, T]
 
         # Get speaker embedding
         emb1 = self.encoder1(proj1)       # [B, 256]
         emb2 = self.encoder2(proj2)       # [B, 256]
-        emb = torch.stack([emb1, emb2], dim=1) #[B,2,256]
+        emb3 = self.encoder3(proj3)
+        emb = torch.stack([emb1, emb2, emb3], dim=1) #[B,2,256]
         return emb
 
 

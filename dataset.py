@@ -68,7 +68,7 @@ class MyLibri2Mix(Dataset):
 
     def __getitem__(self, idx):
 
-        row = self.metadata.iloc[idx] #mixture_ID,mixture_path,source_1_path,source_2_path,speaker_1_ID,speaker_2_ID,length
+        row = self.metadata.iloc[idx] #mixture_ID,mixture_path,source_1_path,source_2_path,source_3_path,speaker_1_ID,speaker_2_ID,speaker_3_ID,length
 
         mix_path = row['mixture_path']
 
@@ -194,7 +194,7 @@ class LibriMixDataModule(pl.LightningDataModule):
 
         self.persistent_workers = True if self.num_workers > 0 else False
 
-        self.base_data_path = os.path.join(self.data_root, f"Libriuni_05_08/Libri2Mix_ovl50to80/wav16k/min") #/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/Libriuni_05_08/Libri2Mix_ovl50to80/wav16k/min/metadata/mixture_train-360_mix_clean.csv
+        self.base_data_path = os.path.join(self.data_root, f"3sp/Libri3Mix_ovl50to80/wav16k/min") #/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/3sp/Libri3Mix_ovl50to80/wav16k/min/metadata/mixture_train-360_mix_clean.csv
 
         self.metadata_path = os.path.join(self.base_data_path, "metadata")
 
@@ -205,6 +205,7 @@ class LibriMixDataModule(pl.LightningDataModule):
 
         train_meta = os.path.join(self.metadata_path, "mixture_train-360_mix_clean.csv")
         val_meta = os.path.join(self.metadata_path, "mixture_dev_mix_clean.csv")
+        
 
         self.train_dataset = MyLibri2Mix(
             metadata_path=train_meta,

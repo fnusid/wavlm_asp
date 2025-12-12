@@ -16,12 +16,7 @@ from sklearn.metrics import (
 from sklearn.manifold import TSNE
 import matplotlib.pyplot as plt
 
-from model import SpeakerEncoderDualWrapper   # your dual model class
-
-# Needed for teacher model
-sys.path.append("/home/sidharth./codebase/")
-from wavlm_single_embedding.model import SpeakerEncoderWrapper as SingleSpkEncoder
-
+from transformers import WavLMModel, WavLMConfig
 
 # -----------------------------
 # Global noise config
@@ -38,7 +33,7 @@ random.seed(44)
 
 
 # =====================================================================
-# 0) Utility: mix with SNR
+# 0) Utility: mix with SNR  (same as your dual script)
 # =====================================================================
 def mix_with_snr(clean, noise, snr_db):
     """
@@ -64,31 +59,7 @@ def mix_with_snr(clean, noise, snr_db):
 
 
 # =====================================================================
-# 1) Clean dual-model weight loading
-# =====================================================================
-def strip_dual_model_weights(state):
-    new_state = {}
-    for k, v in state.items():
-        if not k.startswith("model."):
-            continue
-        k2 = k.replace("model.", "")
-        if k2.startswith("single_sp_model.") or k2.startswith("arcface_loss."):
-            continue
-        new_state[k2] = v
-    return new_state
-
-
-def load_dual_model(ckpt_path, emb_dim=256, device="cuda"):
-    ckpt = torch.load(ckpt_path, map_location=device)
-    state = strip_dual_model_weights(ckpt["state_dict"])
-    model = SpeakerEncoderDualWrapper(emb_dim=emb_dim)
-    model.load_state_dict(state, strict=True)
-    model.to(device).eval()
-    return model
-
-
-# =====================================================================
-# 2) LibriMix metadata parser
+# 1) LibriMix metadata parser  (same as your dual script)
 # =====================================================================
 def parse_metadata(csv_path):
     metadata = []
@@ -123,52 +94,74 @@ def parse_metadata(csv_path):
 
 
 # =====================================================================
-# 3) Teacher-aligned dual embedding extraction (PIT-based)
+# 2) WavLM backbone (same as in your dual model, but used directly)
 # =====================================================================
-def get_teacher_emb(teacher_model, wav_path, device="cuda"):
-    wav, sr = torchaudio.load(wav_path)
-    wav = wav.mean(0).to(device).unsqueeze(0)
+def load_wavlm(device="cuda"):
+    config = WavLMConfig.from_pretrained("microsoft/wavlm-base-plus")
+    model = WavLMModel.from_pretrained(
+        "microsoft/wavlm-base-plus",
+        config=config,
+        ignore_mismatched_sizes=True
+    )
+    model.to(device).eval()
+    model.requires_grad_(False)
+    return model
 
+
+def get_wavlm_features(wavlm, wav, sr, device="cuda"):
+    """
+    wav: 1D torch tensor [T] (mixture, mono)
+    sr : sampling rate
+    Returns:
+        feats: np.ndarray [T_frames, D]
+    """
+    if sr != 16000:
+        wav = torchaudio.functional.resample(wav, sr, 16000)
+        sr = 16000
+
+    wav = wav.to(device).unsqueeze(0)  # [1, T]
     with torch.no_grad():
-        e = teacher_model(wav)  # [1,256]
-    return e.squeeze(0)  # [256]
+        out = wavlm(wav)
+        feats = out.last_hidden_state[0]  # [T_frames, D]
+    return feats.cpu().numpy()  # [T_frames, D]
 
 
-def extract_dual_embeddings_with_teacher(
-    dual_model,
-    teacher_model,
+# =====================================================================
+# 3) WavLM + KMeans embedding extraction (2 clusters → 2 embeddings)
+# =====================================================================
+def extract_kmeans_embeddings_wavlm(
+    wavlm,
     metadata,
     device="cuda",
-    verbose=True
+    verbose=True,
 ):
     """
-    Correct PIT evaluation:
-      - get e0, e1 from dual model
-      - get t1, t2 from clean teacher embeddings
-      - match e0/e1 to speakers using cosine similarity
-
+    For each mixture:
+      - Load mixture (+ optional WHAM noise).
+      - Pass mixture through WavLM to get frame-level features [T_frames, D].
+      - Run KMeans with K=2 on frames.
+      - For each cluster, average all frames in that cluster → cluster embedding.
+      - Assign each cluster a speaker ID via majority vote using frame-wise
+        dominant speaker labels from clean src1/src2 (only used for labeling).
     Returns:
-      all_embs   -> [N,256]
+      all_embs   -> [N, D]
       all_labels -> [N]
     """
     all_embs = []
     all_labels = []
 
-    def cosine(a, b):
-        return (a @ b) / (a.norm() * b.norm() + 1e-8)
-
-    iterator = tqdm(metadata, desc="Extracting embeddings", disable=not verbose)
+    iterator = tqdm(metadata, desc="Extracting WavLM+KMeans embeddings", disable=not verbose)
 
     for entry in iterator:
         mix_path = entry["mix_path"]
-        src1 = entry["src1"]
-        src2 = entry["src2"]
-        spk1 = entry["spk1"]
-        spk2 = entry["spk2"]
+        src1_path = entry["src1"]
+        src2_path = entry["src2"]
+        spk1_id = entry["spk1"]
+        spk2_id = entry["spk2"]
 
         # ------------ Load mixture ------------
         mix, sr = torchaudio.load(mix_path)
-        mix = mix.mean(0)
+        mix = mix.mean(0)  # mono
 
         # ------------ Add WHAM noise (optional) ------------
         if add_noise and noise_files:
@@ -185,36 +178,83 @@ def extract_dual_embeddings_with_teacher(
 
             mix = mix_with_snr(mix, noise_wav.squeeze(0), snr)
 
-        mix = mix.to(device).unsqueeze(0)
+        # ------------ Load clean sources (for cluster->speaker labeling only) ------------
+        src1, sr1 = torchaudio.load(src1_path)
+        src2, sr2 = torchaudio.load(src2_path)
+        src1 = src1.mean(0)
+        src2 = src2.mean(0)
 
-        # ------------ Dual embeddings ------------
-        with torch.no_grad():
-            ed = dual_model(mix)
-        e0, e1 = ed.squeeze(0)   # [2,256]
+        if sr1 != 16000:
+            src1 = torchaudio.functional.resample(src1, sr1, 16000)
+        if sr2 != 16000:
+            src2 = torchaudio.functional.resample(src2, sr2, 16000)
 
-        # ------------ Teacher embeddings ------------
-        t1 = get_teacher_emb(teacher_model, src1, device)
-        t2 = get_teacher_emb(teacher_model, src2, device)
+        # ------------ WavLM features ------------
+        feats = get_wavlm_features(wavlm, mix, sr, device=device)  # [T_frames, D]
+        T_frames, D = feats.shape
+        if T_frames < 2:
+            continue
 
-        # ------------ PIT matching ------------
-        score_direct = cosine(e0, t1) + cosine(e1, t2)
-        score_swap   = cosine(e0, t2) + cosine(e1, t1)
+        # approximate hop in samples for mapping frames to sources
+        hop_samples = len(src1) / float(T_frames)
 
-        if score_direct >= score_swap:
-            mapped = [(e0, spk1), (e1, spk2)]
-        else:
-            mapped = [(e0, spk2), (e1, spk1)]
+        # ------------ frame-wise dominant speaker labels (for voting only) ------------
+        src1_np = src1.cpu().numpy()
+        src2_np = src2.cpu().numpy()
+        frame_dom = []
+        T_sig = min(len(src1_np), len(src2_np))
+        for i in range(T_frames):
+            start = int(i * hop_samples)
+            end = int((i + 1) * hop_samples)
+            if start >= T_sig:
+                frame_dom.append(0)
+                continue
+            end = min(end, T_sig)
+            seg1 = src1_np[start:end]
+            seg2 = src2_np[start:end]
+            e1 = np.mean(seg1**2) + 1e-10
+            e2 = np.mean(seg2**2) + 1e-10
+            # 1 = speaker1 dominant, 2 = speaker2 dominant
+            frame_dom.append(1 if e1 >= e2 else 2)
+        frame_dom = np.array(frame_dom, dtype=np.int64)
 
-        # ------------ Store ------------
-        for e, lab in mapped:
-            all_embs.append(e.cpu().numpy())
-            all_labels.append(lab)
+        # ------------ KMeans on WavLM features (K=2 speakers) ------------
+        kmeans = KMeans(n_clusters=2, n_init=10, random_state=0)
+        cluster_ids = kmeans.fit_predict(feats)  # [T_frames]
 
+        # ------------ For each cluster: average features + majority-vote speaker ------------
+        for c in range(2):
+            mask = cluster_ids == c
+            if not np.any(mask):
+                continue
+
+            cluster_feats = feats[mask]          # [Nc, D]
+            cluster_emb = cluster_feats.mean(axis=0)  # [D]
+
+            cluster_frame_labels = frame_dom[mask]
+            # count how many frames mapped to spk1 vs spk2
+            count1 = np.sum(cluster_frame_labels == 1)
+            count2 = np.sum(cluster_frame_labels == 2)
+
+            if count1 == 0 and count2 == 0:
+                # no usable frames, skip
+                continue
+
+            if count1 >= count2:
+                spk_id = spk1_id
+            else:
+                spk_id = spk2_id
+
+            all_embs.append(cluster_emb)
+            all_labels.append(spk_id)
+
+    if len(all_embs) == 0:
+        return np.zeros((0, 768)), np.zeros((0,))
     return np.vstack(all_embs), np.array(all_labels)
 
 
 # =====================================================================
-# 4) Clustering + Separation Metrics
+# 4) Clustering + Separation Metrics (same as your script)
 # =====================================================================
 def compute_clustering_metrics(embs, labels):
     norms = np.linalg.norm(embs, axis=1, keepdims=True) + 1e-10
@@ -223,7 +263,7 @@ def compute_clustering_metrics(embs, labels):
 
     same, diff = [], []
     for i in range(N):
-        for j in range(i+1, N):
+        for j in range(i + 1, N):
             cos = float(np.dot(e[i], e[j]))
             if labels[i] == labels[j]:
                 same.append(cos)
@@ -277,13 +317,9 @@ def _cluster_accuracy(pred_labels, true_labels):
 
 
 # =====================================================================
-# 5) TSNE visualization for 3–4 speakers
+# 5) TSNE visualization (same as your script)
 # =====================================================================
-def plot_tsne_subset(embs, labels, num_speakers=4, save_path="tsne_subset.png"):
-    """
-    embs   : [N, D] numpy
-    labels : [N]   numpy speaker IDs
-    """
+def plot_tsne_subset(embs, labels, num_speakers=4, save_path="tsne_kmeans_subset.png"):
     speakers = np.unique(labels)
     if len(speakers) == 0:
         print("No speakers found, skipping TSNE.")
@@ -316,7 +352,7 @@ def plot_tsne_subset(embs, labels, num_speakers=4, save_path="tsne_subset.png"):
         plt.scatter(pts[:, 0], pts[:, 1], s=18, label=f"Spk {spk}")
 
     plt.legend(title="Speakers")
-    plt.title("t-SNE of Dual Speaker Embeddings (subset of speakers)")
+    plt.title("t-SNE of WavLM+KMeans Cluster Embeddings (subset of speakers)")
     plt.tight_layout()
     plt.savefig(save_path, dpi=300)
     print(f"[✔] Saved TSNE plot to {save_path}")
@@ -327,10 +363,7 @@ def plot_tsne_subset(embs, labels, num_speakers=4, save_path="tsne_subset.png"):
 # =====================================================================
 if __name__ == "__main__":
     META = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/Libriuni_05_08/Libri2Mix_ovl50to80/wav16k/min/metadata/mixture_test_mix_clean.csv"
-    CKPT = "/mnt/disks/data/model_ckpts/librispeech_asp_ft_wavlm_linear_dualemb_tr360/best-epoch=49-val_separation=0.000.ckpt"
-    # CKPT = "/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_dualemb/best-epoch=50-val_separation=0.000.ckpt" # WITHOUT FINE-TUNING WAVLM LAST 6 LAYERS
-    TEACHER_CKPT = "/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_tr360/best-epoch=62-val_separation=0.000.ckpt"
-    TSNE_SAVE_PATH = "/home/sidharth./codebase/wavlm_dual_embedding/analysis/tsne_new/dual_devclean_whamtt_subset_tsne_linearasp.png"
+    TSNE_SAVE_PATH = "/home/sidharth./codebase/wavlm_dual_embedding/analysis/tsne_new/kmeans_devclean_whamtt_subset_tsne.png"
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print("Using device:", device)
@@ -339,36 +372,12 @@ if __name__ == "__main__":
     metadata = parse_metadata(META)
     print(f"Loaded {len(metadata)} mixtures.")
 
-    # ---- Load Teacher Model ----
-    teacher = SingleSpkEncoder().to(device)
-    ckpt = torch.load(TEACHER_CKPT, map_location=device)
-    state = ckpt["state_dict"]
+    # ---- Load WavLM ----
+    wavlm = load_wavlm(device=device)
 
-    filtered = {}
-    for k, v in state.items():
-        # keep ONLY parameters under model.*, but drop arcface
-        if not k.startswith("model."):
-            continue
-        if "arcface" in k or "arc_face" in k:
-            continue
-
-        # strip "model." prefix
-        new_k = k.replace("model.", "", 1)
-        filtered[new_k] = v
-
-    print("Loaded teacher keys:", len(filtered))
-    teacher.load_state_dict(filtered, strict=True)
-    teacher.eval()
-    for p in teacher.parameters():
-        p.requires_grad = False
-
-    # ---- Load Dual Model ----
-    dual = load_dual_model(CKPT, device=device)
-
-    # ---- Extract Embeddings ----
-    embs, labels = extract_dual_embeddings_with_teacher(
-        dual_model=dual,
-        teacher_model=teacher,
+    # ---- Extract WavLM+KMeans Embeddings ----
+    embs, labels = extract_kmeans_embeddings_wavlm(
+        wavlm=wavlm,
         metadata=metadata,
         device=device,
         verbose=True,
@@ -376,10 +385,10 @@ if __name__ == "__main__":
     print(f"Extracted {len(embs)} embeddings for {len(np.unique(labels))} speakers.")
 
     # ---- Compute Metrics ----
-    print("\nComputing clustering metrics...")
+    print("\nComputing clustering metrics (WavLM+KMeans)...")
     res = compute_clustering_metrics(embs, labels)
 
-    print("\n=== Clustering / Separation Metrics (Full Dev) ===")
+    print("\n=== Clustering / Separation Metrics (WavLM+KMeans, Full Dev) ===")
     print(f"same_mean_cos = {res['same_mean_cos']:.4f}")
     print(f"diff_mean_cos = {res['diff_mean_cos']:.4f}")
     print(f"separation    = {res['separation']:.4f}")
@@ -388,5 +397,5 @@ if __name__ == "__main__":
     print(f"ari           = {res['ari']:.4f}")
     print(f"silhouette    = {res['silhouette']:.4f}")
 
-    # # ---- TSNE on subset of speakers ----
+    # ---- TSNE on subset of speakers ----
     # plot_tsne_subset(embs, labels, num_speakers=4, save_path=TSNE_SAVE_PATH)
