@@ -64,20 +64,23 @@ def mix_with_snr(clean, noise, snr_db):
 def parse_metadata(csv_path):
     metadata = []
     filename = os.path.basename(csv_path)
-
+    '''
+    mixture_ID,mixture_path,source_1_path,source_2_path,source_3_path,speaker_1_ID,speaker_2_ID,speaker_3_ID,length
+    '''
     with open(csv_path, "r") as f:
         header = next(f)
         for line in f:
             parts = line.strip().split(",")
 
             if filename.split("_")[-1] == "both.csv":
-                if len(parts) != 8:
+                if len(parts) != 10:
                     continue
-                mix_id, mix_path, src1, src2, spk1, spk2, noise, length = parts
+                mix_id, mix_path, src1, src2, src3, spk1, spk2, spk3, noise, length = parts
             else:
-                if len(parts) != 7:
+          
+                if len(parts) != 9:
                     continue
-                mix_id, mix_path, src1, src2, spk1, spk2, length = parts
+                mix_id, mix_path, src1, src2, src3, spk1, spk2, spk3, length = parts
 
             if spk1 == "speaker_1_ID":
                 continue
@@ -86,8 +89,10 @@ def parse_metadata(csv_path):
                 "mix_path": mix_path,
                 "src1": src1,
                 "src2": src2,
+                "src3": src3,
                 "spk1": int(spk1),
                 "spk2": int(spk2),
+                "spk3": int(spk3)
             })
 
     return metadata
@@ -156,8 +161,10 @@ def extract_kmeans_embeddings_wavlm(
         mix_path = entry["mix_path"]
         src1_path = entry["src1"]
         src2_path = entry["src2"]
+        src3_path = entry["src3"]
         spk1_id = entry["spk1"]
         spk2_id = entry["spk2"]
+        spk3_id = entry["spk3"]
 
         # ------------ Load mixture ------------
         mix, sr = torchaudio.load(mix_path)
@@ -181,13 +188,17 @@ def extract_kmeans_embeddings_wavlm(
         # ------------ Load clean sources (for cluster->speaker labeling only) ------------
         src1, sr1 = torchaudio.load(src1_path)
         src2, sr2 = torchaudio.load(src2_path)
+        src3, sr3 = torchaudio.load(src3_path)
         src1 = src1.mean(0)
         src2 = src2.mean(0)
+        src3 = src3.mean(0)
 
         if sr1 != 16000:
             src1 = torchaudio.functional.resample(src1, sr1, 16000)
         if sr2 != 16000:
             src2 = torchaudio.functional.resample(src2, sr2, 16000)
+        if sr3 != 16000:
+            src3 = torchaudio.functional.resample(src3, sr3, 16000)
 
         # ------------ WavLM features ------------
         feats = get_wavlm_features(wavlm, mix, sr, device=device)  # [T_frames, D]
@@ -201,8 +212,10 @@ def extract_kmeans_embeddings_wavlm(
         # ------------ frame-wise dominant speaker labels (for voting only) ------------
         src1_np = src1.cpu().numpy()
         src2_np = src2.cpu().numpy()
+        src3_np = src3.cpu().numpy()
+
         frame_dom = []
-        T_sig = min(len(src1_np), len(src2_np))
+        T_sig = min(len(src1_np), len(src2_np), len(src3_np))
         for i in range(T_frames):
             start = int(i * hop_samples)
             end = int((i + 1) * hop_samples)
@@ -212,18 +225,30 @@ def extract_kmeans_embeddings_wavlm(
             end = min(end, T_sig)
             seg1 = src1_np[start:end]
             seg2 = src2_np[start:end]
+            seg3 = src3_np[start:end]
             e1 = np.mean(seg1**2) + 1e-10
             e2 = np.mean(seg2**2) + 1e-10
+            e3 = np.mean(seg3**2) + 1e-10
             # 1 = speaker1 dominant, 2 = speaker2 dominant
-            frame_dom.append(1 if e1 >= e2 else 2)
+            if e1>e2:
+                if e1>e3:
+                    frame_dom.append(1)
+                else:
+                    frame_dom.append(3)
+            else:
+                if e2 > e3:
+                    frame_dom.append(2)
+                else:
+                    frame_dom.append(3)
+            # frame_dom.append(1 if e1 >= e2 else 2)
         frame_dom = np.array(frame_dom, dtype=np.int64)
 
         # ------------ KMeans on WavLM features (K=2 speakers) ------------
-        kmeans = KMeans(n_clusters=2, n_init=10, random_state=0)
+        kmeans = KMeans(n_clusters=3, n_init=10, random_state=0)
         cluster_ids = kmeans.fit_predict(feats)  # [T_frames]
 
         # ------------ For each cluster: average features + majority-vote speaker ------------
-        for c in range(2):
+        for c in range(3):
             mask = cluster_ids == c
             if not np.any(mask):
                 continue
@@ -235,15 +260,23 @@ def extract_kmeans_embeddings_wavlm(
             # count how many frames mapped to spk1 vs spk2
             count1 = np.sum(cluster_frame_labels == 1)
             count2 = np.sum(cluster_frame_labels == 2)
+            count3 = np.sum(cluster_frame_labels == 3)
 
-            if count1 == 0 and count2 == 0:
+            if count1 == 0 and count2 == 0 and count3 == 0:
                 # no usable frames, skip
                 continue
 
             if count1 >= count2:
-                spk_id = spk1_id
+                if count1>=count3:
+                    spk_id = spk1_id
+                else:
+                    spk_id = spk3_id
             else:
-                spk_id = spk2_id
+                if count2 >=count3:
+                    spk_id = spk2_id
+                else:
+                    spk_id = spk3_id
+
 
             all_embs.append(cluster_emb)
             all_labels.append(spk_id)
@@ -362,7 +395,7 @@ def plot_tsne_subset(embs, labels, num_speakers=4, save_path="tsne_kmeans_subset
 # 6) MAIN
 # =====================================================================
 if __name__ == "__main__":
-    META = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/Libriuni_05_08/Libri2Mix_ovl50to80/wav16k/min/metadata/mixture_test_mix_clean.csv"
+    META = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/3sp/Libri3Mix_ovl50to80/wav16k/min/metadata/mixture_test_mix_clean.csv"
     TSNE_SAVE_PATH = "/home/sidharth./codebase/wavlm_dual_embedding/analysis/tsne_new/kmeans_devclean_whamtt_subset_tsne.png"
 
     device = "cuda" if torch.cuda.is_available() else "cpu"

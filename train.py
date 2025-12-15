@@ -232,9 +232,9 @@ if __name__ == "__main__":
     dm = LibriMixDataModule(
         data_root=DATA_ROOT,
         speaker_map_path=SPEAKER_MAP,
-        batch_size=32, 
+        batch_size=16, 
         num_workers=20, # Set this to your preference
-        num_speakers=2
+        num_speakers=3
     )
 
     model = MySpEmb(
@@ -271,17 +271,17 @@ if __name__ == "__main__":
         enable_checkpointing=True,
     )
 
-    trainer = pl.Trainer(
-        accelerator='gpu',
-        devices=[0],
-        max_epochs=100,
-        logger=wandb_logger,
-        overfit_batches=1,
-        limit_train_batches=1,
-        limit_val_batches=1,
-        num_sanity_val_steps=0,
-        enable_checkpointing=False,
-    )
+    # trainer = pl.Trainer(
+    #     accelerator='gpu',
+    #     devices=[0],
+    #     max_epochs=100,
+    #     logger=wandb_logger,
+    #     overfit_batches=1,
+    #     limit_train_batches=1,
+    #     limit_val_batches=1,
+    #     num_sanity_val_steps=0,
+    #     enable_checkpointing=False,
+    # )
 
     # trainer = pl.Trainer(
     #     accelerator="gpu",
@@ -291,6 +291,6 @@ if __name__ == "__main__":
     #     limit_val_batches=1,
     #     num_sanity_val_steps=0,
     # )
-    # trainer.fit(model, datamodule=dm)
+    trainer.fit(model, datamodule=dm)
     # trainer.validate(model, datamodule=dm)
     wandb.finish()

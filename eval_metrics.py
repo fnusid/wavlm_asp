@@ -93,20 +93,23 @@ def load_dual_model(ckpt_path, emb_dim=256, device="cuda"):
 def parse_metadata(csv_path):
     metadata = []
     filename = os.path.basename(csv_path)
-
+    '''
+    mixture_ID,mixture_path,source_1_path,source_2_path,source_3_path,speaker_1_ID,speaker_2_ID,speaker_3_ID,length
+    '''
     with open(csv_path, "r") as f:
         header = next(f)
         for line in f:
             parts = line.strip().split(",")
 
             if filename.split("_")[-1] == "both.csv":
-                if len(parts) != 8:
+                if len(parts) != 10:
                     continue
-                mix_id, mix_path, src1, src2, spk1, spk2, noise, length = parts
+                mix_id, mix_path, src1, src2, src3, spk1, spk2, spk3, noise, length = parts
             else:
-                if len(parts) != 7:
+          
+                if len(parts) != 9:
                     continue
-                mix_id, mix_path, src1, src2, spk1, spk2, length = parts
+                mix_id, mix_path, src1, src2, src3, spk1, spk2, spk3, length = parts
 
             if spk1 == "speaker_1_ID":
                 continue
@@ -115,8 +118,10 @@ def parse_metadata(csv_path):
                 "mix_path": mix_path,
                 "src1": src1,
                 "src2": src2,
+                "src3": src3,
                 "spk1": int(spk1),
                 "spk2": int(spk2),
+                "spk3": int(spk3)
             })
 
     return metadata
@@ -143,9 +148,9 @@ def extract_dual_embeddings_with_teacher(
 ):
     """
     Correct PIT evaluation:
-      - get e0, e1 from dual model
-      - get t1, t2 from clean teacher embeddings
-      - match e0/e1 to speakers using cosine similarity
+      - get e0, e1, e2, from dual model
+      - get t1, t2, t3 from clean teacher embeddings
+      - match e0/e1/e2 to speakers using cosine similarity
 
     Returns:
       all_embs   -> [N,256]
@@ -160,11 +165,14 @@ def extract_dual_embeddings_with_teacher(
     iterator = tqdm(metadata, desc="Extracting embeddings", disable=not verbose)
 
     for entry in iterator:
+        #change here
         mix_path = entry["mix_path"]
         src1 = entry["src1"]
         src2 = entry["src2"]
+        src3 = entry["src3"]
         spk1 = entry["spk1"]
         spk2 = entry["spk2"]
+        spk3 = entry["spk3"]
 
         # ------------ Load mixture ------------
         mix, sr = torchaudio.load(mix_path)
@@ -186,24 +194,47 @@ def extract_dual_embeddings_with_teacher(
             mix = mix_with_snr(mix, noise_wav.squeeze(0), snr)
 
         mix = mix.to(device).unsqueeze(0)
-
+        #change here
         # ------------ Dual embeddings ------------
         with torch.no_grad():
             ed = dual_model(mix)
-        e0, e1 = ed.squeeze(0)   # [2,256]
+        e0, e1, e2 = ed.squeeze(0)   # [3,256]
 
         # ------------ Teacher embeddings ------------
+        #change here
         t1 = get_teacher_emb(teacher_model, src1, device)
         t2 = get_teacher_emb(teacher_model, src2, device)
+        t3 = get_teacher_emb(teacher_model, src3, device)
 
         # ------------ PIT matching ------------
-        score_direct = cosine(e0, t1) + cosine(e1, t2)
-        score_swap   = cosine(e0, t2) + cosine(e1, t1)
+        # score_direct = cosine(e0, t1) + cosine(e1, t2)
+        # score_swap   = cosine(e0, t2) + cosine(e1, t1)
 
-        if score_direct >= score_swap:
-            mapped = [(e0, spk1), (e1, spk2)]
-        else:
-            mapped = [(e0, spk2), (e1, spk1)]
+        # if score_direct >= score_swap:
+        #     mapped = [(e0, spk1), (e1, spk2)]
+        # else:
+        #     mapped = [(e0, spk2), (e1, spk1)]
+        import itertools
+
+        embs    = [e0, e1, e2]      # predicted embeddings
+        targets = [t1, t2, t3]      # reference embeddings
+        spks    = [spk1, spk2, spk3]  # whatever you were pairing with (e.g., "speaker 1", "speaker 2", ...)
+
+        best_score = float("-inf")
+        best_perm = None  # perm will be a permutation of indices into `targets`
+
+        for perm in itertools.permutations(range(3)):  # all 3! = 6 permutations
+            # perm[i] = which target we assign to embs[i]
+            score = 0.0
+            for i in range(3):
+                score += cosine(embs[i], targets[perm[i]])
+            if score > best_score:
+                best_score = score
+                best_perm = perm
+
+        # best_perm is something like (2, 0, 1), meaning:
+        # e0 ↔ t3, e1 ↔ t1, e2 ↔ t2
+        mapped = [(embs[i], spks[best_perm[i]]) for i in range(3)]
 
         # ------------ Store ------------
         for e, lab in mapped:
@@ -326,9 +357,10 @@ def plot_tsne_subset(embs, labels, num_speakers=4, save_path="tsne_subset.png"):
 # 6) MAIN
 # =====================================================================
 if __name__ == "__main__":
-    META = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/Libriuni_05_08/Libri2Mix_ovl50to80/wav16k/min/metadata/mixture_test_mix_clean.csv"
-    CKPT = "/mnt/disks/data/model_ckpts/librispeech_asp_ft_wavlm_linear_dualemb_tr360/best-epoch=49-val_separation=0.000.ckpt"
+    META = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/3sp/Libri3Mix_ovl50to80/wav16k/min/metadata/mixture_test_mix_clean.csv"
+    # CKPT = "/mnt/disks/data/model_ckpts/librispeech_asp_ft_wavlm_linear_dualemb_tr360/best-epoch=49-val_separation=0.000.ckpt"
     # CKPT = "/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_dualemb/best-epoch=50-val_separation=0.000.ckpt" # WITHOUT FINE-TUNING WAVLM LAST 6 LAYERS
+    CKPT = "/mnt/disks/data/model_ckpts/librispeech_asp_3spft_wavlm_linear_dualemb_tr360/best-epoch=54-val_separation=0.000.ckpt"
     TEACHER_CKPT = "/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_tr360/best-epoch=62-val_separation=0.000.ckpt"
     TSNE_SAVE_PATH = "/home/sidharth./codebase/wavlm_dual_embedding/analysis/tsne_new/dual_devclean_whamtt_subset_tsne_linearasp.png"
 
