@@ -315,7 +315,7 @@ def compute_eer_from_trials(model, trial_paths1, trial_paths2, trial_labels, cac
 if __name__ == "__main__":
     # ---- EDIT THESE PATHS ----
     METADATA_TXT = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/LibriSpeech/libri_test_clean.txt"
-    CKPT = "/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_tr360/best-epoch=62-val_separation=0.000.ckpt"
+    CKPT = "/mnt/disks/data/model_ckpts/ft_wavlm_asp_arcface_tr460/best-epoch=0.ckpt"
     TRIALS_CSV = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/LibriSpeech/dev_clean_sp_ver_pairs.csv"  # <-- your CSV with utt1,utt2,label
     TRIALS_CSV_VOX1 = "/mnt/disks/data/datasets/Datasets/Vox1_sp_ver/svs.txt"
 

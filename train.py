@@ -11,6 +11,7 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from dataset import LibriDataModule          # <-- single-speaker Libri datamodule
 from model import SpeakerEncoderWrapper   # <-- your WavLM+ASP encoder
+# from resemblyzer import VoiceEncoder
 from loss import LossWraper
 from metrics import EmbeddingMetrics
 import wandb
@@ -33,9 +34,11 @@ class MySpEmb(pl.LightningModule):
         # -----------------------------
         self.model = SpeakerEncoderWrapper(emb_dim=emb_dim)
 
-        # Optionally unfreeze wavlm if finetuning
-        if finetune_encoder:
-            self.model.wavlm.requires_grad_(True)
+        # # Optionally unfreeze wavlm if finetuning
+        # if finetune_encoder:
+        #     self.model.wavlm.requires_grad_(True)
+
+        # self.model = VoiceEncoder().to("cuda")
 
         # -----------------------------
         # 2. ArcFace classification head
@@ -181,8 +184,8 @@ if __name__ == "__main__":
     dm = LibriDataModule(
         data_root=DATA_ROOT,
         train_speaker_map_path=TRAIN_SPK_MAP,
-        train_batch_size=32,
-        val_batch_size=8,
+        train_batch_size=8,
+        val_batch_size=4,
         num_workers=20,
         sample_rate=16000,
     )
@@ -196,18 +199,18 @@ if __name__ == "__main__":
 
     wandb_logger = WandbLogger(
         project="librispeech-speaker-encoder",
-        name="wavlm_asp_arcface_tr360",
+        name="ft_wavlm_asp_arcface_tr460",
         # name='test_run',
         log_model=False,
-        save_dir="/mnt/disks/data/model_ckpts/librispeech_asp_wavlm/wandb_logs",
+        save_dir="/mnt/disks/data/model_ckpts/ft_wavlm_asp_arcface_tr460/wandb_logs",
     )
 
     ckpt = pl.callbacks.ModelCheckpoint(
         monitor="train/total_loss",
         mode="min",
-        save_top_k=10,
-        filename="best-{epoch}-{val_separation:.3f}",
-        dirpath="/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_tr360/"
+        save_top_k=-1,
+        filename="best-{epoch}",
+        dirpath="/mnt/disks/data/model_ckpts/ft_wavlm_asp_arcface_tr460/"
     )
 
     trainer = pl.Trainer(
@@ -216,7 +219,7 @@ if __name__ == "__main__":
         accelerator="gpu",
 
         devices=[0, 1, 2, 3],
-        max_epochs=500,
+        max_epochs=60,
         logger=wandb_logger,
         callbacks=[ckpt],
         gradient_clip_val=5.0,

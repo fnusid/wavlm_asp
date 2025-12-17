@@ -30,7 +30,7 @@ class SpeakerEncoderWrapper(nn.Module):
     For Phase 1: this is actually a speaker encoder
     using WavLM + projection + ASP.
     """
-    def __init__(self, emb_dim=256):
+    def __init__(self, emb_dim=256, finetune_wavlm=True):
         super().__init__()
 
         # Load WavLM
@@ -41,6 +41,20 @@ class SpeakerEncoderWrapper(nn.Module):
             ignore_mismatched_sizes=True
         )
         self.wavlm.requires_grad_(False)  # freeze full wavlm
+
+        if finetune_wavlm == True:
+            for layer in self.wavlm.encoder.layers[-6:]:
+                for param in layer.parameters():
+                    param.requires_grad = True
+            
+            for param in self.wavlm.encoder.layer_norm.parameters():
+                param.requires_grad = True
+            
+            for param in self.wavlm.encoder.pos_conv_embed.parameters():
+                param.requires_grad = True
+
+            print("Unfreezing last 6 layers of WavLM")
+        
 
         self.wavlm_out = 768
         self.emb_dim = emb_dim
