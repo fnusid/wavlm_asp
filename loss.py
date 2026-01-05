@@ -43,7 +43,7 @@ class ArcFaceLoss(nn.Module):
         self.th = math.cos(math.pi - m)
         self.mm = math.sin(math.pi - m) * m
 
-    def forward(self, embeddings, labels):
+    def forward(self, embeddings, labels, reduction="mean") :
         """
         embeddings: [B, D]  - model output embeddings
         labels:     [B]     - ground truth speaker IDs (ints)
@@ -69,7 +69,34 @@ class ArcFaceLoss(nn.Module):
         logits *= self.s
 
         # Compute standard cross-entropy loss
-        loss = F.cross_entropy(logits, labels)
+        loss = F.cross_entropy(logits, labels, reduction='None')
+        if reduction == "mean":
+            loss = loss.mean()
+        elif reduction == "sum":
+            loss = loss.sum()
+        elif reduction == "none":
+            return loss
+        else:
+            raise RuntimeError("Unknown reduction type: {}".format(reduction))
 
-        preds = torch.argmax(logits, dim = 1)
+# implement PIT based ArcFace loss
+class PITArcFaceLoss(nn.Module):
+    def __init__(self, n_classes, emb_dim=192, s=30.0, m=0.50):
+        super().__init__()
+        self.arcface_loss = ArcFaceLoss(n_classes, emb_dim, s, m)
+    
+    def forward(self, embeddings, labels):
+        """
+        embeddings: [B, 2, D]
+        labels:     [B, 2]  (Long)
+        """
+        e0, e1 = embeddings[:, 0, :], embeddings[:, 1, :]
+        y0, y1 = labels[:, 0].long(), labels[:, 1].long()
+
+        # per-sample losses
+        L_id   = self.arcface(e0, y0, reduction="none") + self.arcface(e1, y1, reduction="none")  # [B]
+        L_swap = self.arcface(e0, y1, reduction="none") + self.arcface(e1, y0, reduction="none")  # [B]
+
+        L_min, pick = torch.min(torch.stack([L_id, L_swap], dim=0), dim=0)  # L_min: [B], pick: [B] (0=id,1=swap)
+        loss = L_min.mean()
         return loss
