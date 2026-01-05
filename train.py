@@ -11,13 +11,14 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from dataset import LibriMixDataModule       
 from model import SpeakerEncoderDualWrapper   
-from loss import LossWraper
-from metrics import EmbeddingMetrics
+# from loss import LossWraper
+from loss import PITArcFaceLoss
+from eval_metrics import compute_clustering_metrics
 import wandb
 import sys
 sys.path.append("/home/sidharth./codebase/")
 
-from wavlm_single_embedding.model import SpeakerEncoderWrapper as SingleSpeakerEncoderWrapper
+# from wavlm_single_embedding.model import SpeakerEncoderWrapper as SingleSpeakerEncoderWrapper
 import random
 random.seed(42)
 import warnings
@@ -38,7 +39,7 @@ class MySpEmb(pl.LightningModule):
         lr: float = 1e-4,
         finetune_encoder: bool = False,
         emb_dim: int = 256,
-        speaker_map_path: str = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/Libriuni_03_08/Libri2Mix_ovl30to80/wav16k/min/metadata/train360_mapping.json",
+        speaker_map_path: str = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/Libriuni_05_08/Libri2Mix_ovl50to80/wav16k/min/metadata/train360_mapping.json",
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -59,33 +60,13 @@ class MySpEmb(pl.LightningModule):
             speaker_map = json.load(f)
 
 
-        self.cosine_loss = LossWraper()
-        #Get the teacher model
-        self.single_sp_model = SingleSpeakerEncoderWrapper(emb_dim=emb_dim)
-        teacher_ckpt_path = "/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_tr360/best-epoch=62-val_separation=0.000.ckpt"
-
-        ckpt = torch.load(teacher_ckpt_path, map_location="cpu")
-        state = ckpt["state_dict"]
-
-        filtered = {}
-        for k, v in state.items():
-            # only keep model.encoder.* or model.wavlm.*, model.projector.*, model.pooling.*
-            if k.startswith("model.") and ("arcface" not in k):
-                filtered[k.replace("model.", "", 1)] = v
-
-        print("Loaded teacher keys:", len(filtered))
-
-        self.single_sp_model.load_state_dict(filtered, strict=True)
-        self.single_sp_model.eval()
-        for param in self.single_sp_model.parameters():
-            param.requires_grad = False
-
-
+        # self.cosine_loss = LossWraper()
+        self.loss_fn = PITArcFaceLoss(num_class=len(speaker_map), emb_dim=emb_dim, s=30, m=0.2)
 
         # -----------------------------
         # 3. Embedding metrics (for validation)
         # -----------------------------
-        self.metrics = EmbeddingMetrics(device="cuda")  # will overwrite device at runtime
+        # self.metrics = EmbeddingMetrics(device="cuda")  # will overwrite device at runtime
 
     def forward(self, wav):
         """
@@ -105,19 +86,8 @@ class MySpEmb(pl.LightningModule):
         """
         mix, source, labels = batch
         emb = self.forward(mix)                    # [B, 2, emb_dim]
-        #change here
-        with torch.no_grad():
-            emb1 = self.single_sp_model(source[:, 0, :])  # [B, emb_dim]
-            emb2 = self.single_sp_model(source[:, 1, :])  # [B, emb_dim]
-            gt_embs = torch.stack([emb1, emb2], dim=1)  # [B, 2, emb_dim]
-        
-        loss = self.cosine_loss(emb, gt_embs)
-        if batch_idx == 0 and self.current_epoch == 0:
-            with torch.no_grad():
-                cos_gt = F.cosine_similarity(gt_embs[:,0,:], gt_embs[:,1,:], dim=-1).mean()
-                cos_pred = F.cosine_similarity(emb[:,0,:], emb[:,1,:], dim=-1).mean()
-                print("Mean cos(gt1, gt2) =", cos_gt.item())
-                print("Mean cos(pred1, pred2) =", cos_pred.item())
+
+        loss = self.loss_fn(emb, labels)
 
         self.log(
             "train/loss",
@@ -177,10 +147,11 @@ class MySpEmb(pl.LightningModule):
             return
 
         # compute metrics
-        results = self.metrics.compute_from_tensors(
-            embs_flat.cpu(),
-            labels_flat.cpu(),
-        )
+        # results = self.metrics.compute_from_tensors(
+        #     embs_flat.cpu(),
+        #     labels_flat.cpu(),
+        # )
+        results = compute_clustering_metrics(embs_flat, labels_flat)
 
         # logging
         for k, v in results.items():
@@ -244,10 +215,10 @@ if __name__ == "__main__":
 
     wandb_logger = WandbLogger(
         project="librispeech-speaker-encoder",
-        name="ft_wavlm_linear_dualemb_tr360",
+        name="ft_wavlm_linear_dualemb_noteacher_tr360",
         # name='test_run',
         log_model=False,
-        save_dir="/mnt/disks/data/model_ckpts/librispeech_asp_ft_wavlm_linear_dualemb_tr360/wandb_logs",
+        save_dir="/mnt/disks/data/model_ckpts/ft_wavlm_linear_dualemb_noteacher_tr360/wandb_logs",
     )
 
     ckpt = pl.callbacks.ModelCheckpoint(
@@ -255,7 +226,7 @@ if __name__ == "__main__":
         mode="min",
         save_top_k=1,
         filename="best-{epoch}-{val_separation:.3f}",
-        dirpath="/mnt/disks/data/model_ckpts/librispeech_asp_ft_wavlm_linear_dualemb_tr360/"
+        dirpath="/mnt/disks/data/model_ckpts/ft_wavlm_linear_dualemb_noteacher_tr360/"
     )
 
     trainer = pl.Trainer(
