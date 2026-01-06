@@ -61,7 +61,7 @@ class MySpEmb(pl.LightningModule):
 
 
         # self.cosine_loss = LossWraper()
-        self.loss_fn = PITArcFaceLoss(num_class=len(speaker_map), emb_dim=emb_dim, s=30, m=0.2)
+        self.loss_fn = PITArcFaceLoss(n_classes=len(speaker_map), emb_dim=emb_dim, s=30, m=0.2)
 
         # -----------------------------
         # 3. Embedding metrics (for validation)
@@ -201,7 +201,7 @@ if __name__ == "__main__":
     dm = LibriMixDataModule(
         data_root=DATA_ROOT,
         speaker_map_path=SPEAKER_MAP,
-        batch_size=32, 
+        batch_size=4, 
         num_workers=20, # Set this to your preference
         num_speakers=2
     )

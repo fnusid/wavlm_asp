@@ -108,7 +108,7 @@ class ArcFaceLoss(nn.Module):
         self.th = math.cos(math.pi - m)
         self.mm = math.sin(math.pi - m) * m
 
-    def forward(self, embeddings, labels, reduction="mean") :
+    def forward(self, embeddings, labels, reduction="none") :
         """
         embeddings: [B, D]  - model output embeddings
         labels:     [B]     - ground truth speaker IDs (ints)
@@ -134,7 +134,7 @@ class ArcFaceLoss(nn.Module):
         logits *= self.s
 
         # Compute standard cross-entropy loss
-        loss = F.cross_entropy(logits, labels, reduction='None')
+        loss = F.cross_entropy(logits, labels, reduction=reduction)
         if reduction == "mean":
             loss = loss.mean()
         elif reduction == "sum":
@@ -146,9 +146,9 @@ class ArcFaceLoss(nn.Module):
 
 # implement PIT based ArcFace loss
 class PITArcFaceLoss(nn.Module):
-    def __init__(self, n_classes, emb_dim=192, s=30.0, m=0.50):
+    def __init__(self, n_classes, emb_dim=256, s=30.0, m=0.50):
         super().__init__()
-        self.arcface_loss = ArcFaceLoss(n_classes, emb_dim, s, m)
+        self.arcface = ArcFaceLoss(n_classes, emb_dim, s, m)
     
     def forward(self, embeddings, labels):
         """
