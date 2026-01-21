@@ -362,7 +362,7 @@ if __name__ == "__main__":
     # CKPT = "/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_dualemb/best-epoch=50-val_separation=0.000.ckpt" # WITHOUT FINE-TUNING WAVLM LAST 6 LAYERS
     CKPT = "/mnt/disks/data/model_ckpts/librispeech_asp_3spft_wavlm_linear_dualemb_tr360/best-epoch=54-val_separation=0.000.ckpt"
     TEACHER_CKPT = "/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_tr360/best-epoch=62-val_separation=0.000.ckpt"
-    TSNE_SAVE_PATH = "/home/sidharth./codebase/wavlm_dual_embedding/analysis/tsne_new/dual_devclean_whamtt_subset_tsne_linearasp.png"
+    TSNE_SAVE_PATH = "/home/sidharth./codebase/wavlm_dual_embedding/analysis/tsne_final/three_sp_test.png"
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print("Using device:", device)
@@ -421,4 +421,4 @@ if __name__ == "__main__":
     print(f"silhouette    = {res['silhouette']:.4f}")
 
     # # ---- TSNE on subset of speakers ----
-    # plot_tsne_subset(embs, labels, num_speakers=4, save_path=TSNE_SAVE_PATH)
+    plot_tsne_subset(embs, labels, num_speakers=4, save_path=TSNE_SAVE_PATH)
