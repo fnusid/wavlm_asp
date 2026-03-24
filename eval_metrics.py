@@ -289,7 +289,49 @@ def _cluster_accuracy(pred_labels, true_labels):
 # =====================================================================
 # 5) TSNE visualization for 3–4 speakers
 # =====================================================================
-def plot_tsne_subset(embs, labels, num_speakers=4, save_path="tsne_subset.png"):
+# def plot_tsne_subset(embs, labels, num_speakers=4, save_path="tsne_subset.png"):
+#     """
+#     embs   : [N, D] numpy
+#     labels : [N]   numpy speaker IDs
+#     """
+#     speakers = np.unique(labels)
+#     if len(speakers) == 0:
+#         print("No speakers found, skipping TSNE.")
+#         return
+
+#     k = min(num_speakers, len(speakers))
+#     chosen = np.random.choice(speakers, size=k, replace=False)
+
+#     mask = np.isin(labels, chosen)
+#     X = embs[mask]
+#     Y = labels[mask]
+
+#     if X.shape[0] < 10:
+#         print("Too few points for TSNE, skipping.")
+#         return
+
+#     tsne = TSNE(
+#         n_components=2,
+#         perplexity=20,
+#         learning_rate="auto",
+#         init="pca"
+#     )
+#     coords = tsne.fit_transform(X)
+
+#     plt.figure(figsize=(10, 8))
+#     for spk in chosen:
+#         idx = (Y == spk)
+#         pts = coords[idx]
+#         plt.scatter(pts[:, 0], pts[:, 1], s=18, label=f"Spk {spk}")
+
+#     plt.legend(title="Speakers")
+#     plt.title("t-SNE of Dual Speaker Embeddings (subset of speakers)")
+#     plt.tight_layout()
+#     plt.savefig(save_path, dpi=300)
+#     print(f"[✔] Saved TSNE plot to {save_path}")
+
+
+def plot_tsne_subset(embs, labels, num_speakers=40, save_path="tsne_subset.png"):
     """
     embs   : [N, D] numpy
     labels : [N]   numpy speaker IDs
@@ -314,17 +356,48 @@ def plot_tsne_subset(embs, labels, num_speakers=4, save_path="tsne_subset.png"):
         n_components=2,
         perplexity=20,
         learning_rate="auto",
-        init="pca"
+        init="pca",
+        random_state=0
     )
     coords = tsne.fit_transform(X)
+
+    # ---- style assignment: color + marker ----
+    cmap = plt.cm.get_cmap("turbo", k)   # good for many categories
+    markers = ['o', '^', 's', 'D', 'v', 'P', 'X', '*', '<', '>', 'h', 'H', 'p', '+', 'x', '1', '2', '3', '4']
+    m = len(markers)
+
+    styles = {}
+    for i, spk in enumerate(chosen):
+        styles[spk] = {
+            "color": cmap(i),
+            "marker": markers[i % m]
+        }
 
     plt.figure(figsize=(10, 8))
     for spk in chosen:
         idx = (Y == spk)
         pts = coords[idx]
-        plt.scatter(pts[:, 0], pts[:, 1], s=18, label=f"Spk {spk}")
+        st = styles[spk]
+        plt.scatter(
+            pts[:, 0], pts[:, 1],
+            s=22,
+            c=[st["color"]],
+            marker=st["marker"],
+            alpha=0.80,
+            linewidths=0.3,
+            edgecolors="k",   # thin edge improves readability
+            label=f"Spk {spk}"
+        )
 
-    plt.legend(title="Speakers")
+    # Legend tweaks for 40 speakers
+    plt.legend(
+        title="Speakers",
+        ncol=2,
+        fontsize=7,
+        title_fontsize=8,
+        markerscale=1.0,
+        frameon=True
+    )
     plt.title("t-SNE of Dual Speaker Embeddings (subset of speakers)")
     plt.tight_layout()
     plt.savefig(save_path, dpi=300)
@@ -335,72 +408,75 @@ def plot_tsne_subset(embs, labels, num_speakers=4, save_path="tsne_subset.png"):
 # 6) MAIN
 # =====================================================================
 if __name__ == "__main__":
-    META = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/Libriuni_05_08/Libri2Mix_ovl50to80/wav16k/min/metadata/mixture_test_mix_clean.csv"
-    CKPT = "/mnt/disks/data/model_ckpts/librispeech_asp_ft_wavlm_linear_dualemb_tr360/best-epoch=49-val_separation=0.000.ckpt"
-    ckpt_joint_trained = "/mnt/disks/data/model_ckpts/pDCCRN_2sp_dpccn_joint_training_freezewavlm_indloss/best-epoch=19-val_separation=0.000.ckpt"
-    # CKPT = "/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_dualemb/best-epoch=50-val_separation=0.000.ckpt" # WITHOUT FINE-TUNING WAVLM LAST 6 LAYERS
-    TEACHER_CKPT = "/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_tr360/best-epoch=62-val_separation=0.000.ckpt"
-    TSNE_SAVE_PATH = "/home/sidharth./codebase/wavlm_dual_embedding/analysis/tsne_final/two_sp_test_joint_train_seed42.png"
+    # META = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/Libriuni_05_08/Libri2Mix_ovl50to80/wav16k/min/metadata/mixture_test_mix_clean.csv"
+    for ovlp in [0, 25, 50, 75, 100]:
+        META = f"/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/Libri2Mix_{ovlp}vlp/Libri2Mix_ovl{ovlp}to{ovlp}/wav16k/min/metadata/mixture_test_mix_clean.csv"
+        CKPT = "/mnt/disks/data/model_ckpts/librispeech_asp_ft_wavlm_linear_dualemb_tr360/best-epoch=49-val_separation=0.000.ckpt"
+        ckpt_joint_trained = "/mnt/disks/data/model_ckpts/pDCCRN_2sp_dpccn_joint_training_freezewavlm_indloss/best-epoch=19-val_separation=0.000.ckpt"
+        # CKPT = "/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_dualemb/best-epoch=50-val_separation=0.000.ckpt" # WITHOUT FINE-TUNING WAVLM LAST 6 LAYERS
+        TEACHER_CKPT = "/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_tr360/best-epoch=62-val_separation=0.000.ckpt"
+        TSNE_SAVE_PATH = f"/home/sidharth./codebase/wavlm_dual_embedding/analysis/tsne_final/two_sp_test_joint_train_20sp_overlap{ovlp}.png"
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print("Using device:", device)
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        print("Using device:", device)
 
-    # ---- Load Metadata ----
-    metadata = parse_metadata(META)
-    print(f"Loaded {len(metadata)} mixtures.")
+        # ---- Load Metadata ----
 
-    # ---- Load Teacher Model ----
-    teacher = SingleSpkEncoder().to(device)
-    ckpt = torch.load(TEACHER_CKPT, map_location=device)
-    state = ckpt["state_dict"]
+        metadata = parse_metadata(META)
+        print(f"Loaded {len(metadata)} mixtures.")
 
-    filtered = {}
-    for k, v in state.items():
-        # keep ONLY parameters under model.*, but drop arcface
-        if not k.startswith("model."):
-            continue
-        if "arcface" in k or "arc_face" in k:
-            continue
+        # ---- Load Teacher Model ----
+        teacher = SingleSpkEncoder().to(device)
+        ckpt = torch.load(TEACHER_CKPT, map_location=device)
+        state = ckpt["state_dict"]
 
-        # strip "model." prefix
-        new_k = k.replace("model.", "", 1)
-        filtered[new_k] = v
+        filtered = {}
+        for k, v in state.items():
+            # keep ONLY parameters under model.*, but drop arcface
+            if not k.startswith("model."):
+                continue
+            if "arcface" in k or "arc_face" in k:
+                continue
 
-    print("Loaded teacher keys:", len(filtered))
-    teacher.load_state_dict(filtered, strict=True)
-    teacher.eval()
-    for p in teacher.parameters():
-        p.requires_grad = False
+            # strip "model." prefix
+            new_k = k.replace("model.", "", 1)
+            filtered[new_k] = v
 
-    # ---- Load Dual Model ----
-    dual = load_dual_model(CKPT, device=device)
-    joint_ckpt = torch.load(ckpt_joint_trained, map_location=device)
-    joint_state = joint_trained_model_weights(joint_ckpt['state_dict'])
-    dual.load_state_dict(joint_state, strict=True)
-    
+        print("Loaded teacher keys:", len(filtered))
+        teacher.load_state_dict(filtered, strict=True)
+        teacher.eval()
+        for p in teacher.parameters():
+            p.requires_grad = False
 
-    # ---- Extract Embeddings ----
-    embs, labels = extract_dual_embeddings_with_teacher(
-        dual_model=dual,
-        teacher_model=teacher,
-        metadata=metadata,
-        device=device,
-        verbose=True,
-    )
-    print(f"Extracted {len(embs)} embeddings for {len(np.unique(labels))} speakers.")
+        # ---- Load Dual Model ----
+        dual = load_dual_model(CKPT, device=device)
+        joint_ckpt = torch.load(ckpt_joint_trained, map_location=device)
+        joint_state = joint_trained_model_weights(joint_ckpt['state_dict'])
+        dual.load_state_dict(joint_state, strict=True)
+        
 
-    # ---- Compute Metrics ----
-    print("\nComputing clustering metrics...")
-    res = compute_clustering_metrics(embs, labels)
+        # ---- Extract Embeddings ----
+        embs, labels = extract_dual_embeddings_with_teacher(
+            dual_model=dual,
+            teacher_model=teacher,
+            metadata=metadata,
+            device=device,
+            verbose=True,
+        )
+        print(f"Extracted {len(embs)} embeddings for {len(np.unique(labels))} speakers.")
 
-    print("\n=== Clustering / Separation Metrics (Full Dev) ===")
-    print(f"same_mean_cos = {res['same_mean_cos']:.4f}")
-    print(f"diff_mean_cos = {res['diff_mean_cos']:.4f}")
-    print(f"separation    = {res['separation']:.4f}")
-    print(f"cluster_acc   = {res['cluster_acc']:.4f}")
-    print(f"nmi           = {res['nmi']:.4f}")
-    print(f"ari           = {res['ari']:.4f}")
-    print(f"silhouette    = {res['silhouette']:.4f}")
+        # ---- Compute Metrics ----
+        print(f"\nComputing clustering metrics for overlap {ovlp}...")
+        res = compute_clustering_metrics(embs, labels)
 
-    # ---- TSNE on subset of speakers ----
-    plot_tsne_subset(embs, labels, num_speakers=4, save_path=TSNE_SAVE_PATH)
+        print("\n=== Clustering / Separation Metrics (Full Dev) ===")
+        print(f"same_mean_cos = {res['same_mean_cos']:.4f}")
+        print(f"diff_mean_cos = {res['diff_mean_cos']:.4f}")
+        print(f"separation    = {res['separation']:.4f}")
+        print(f"cluster_acc   = {res['cluster_acc']:.4f}")
+        print(f"nmi           = {res['nmi']:.4f}")
+        print(f"ari           = {res['ari']:.4f}")
+        print(f"silhouette    = {res['silhouette']:.4f}")
+
+        # ---- TSNE on subset of speakers ----
+        plot_tsne_subset(embs, labels, num_speakers=20, save_path=TSNE_SAVE_PATH)
