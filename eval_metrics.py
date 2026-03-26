@@ -12,7 +12,8 @@ from sklearn.metrics import (
     silhouette_score,
     roc_curve,
 )
-
+import sys 
+sys.path.append('/home/sidharth./codebase/wavlm_single_embedding')
 from model import SpeakerEncoderWrapper  # your single-speaker model
 import random
 add_noise = True  # set True to enable noise corruption
