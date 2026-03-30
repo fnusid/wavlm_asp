@@ -15,9 +15,10 @@ from loss import LossWraper
 from metrics import EmbeddingMetrics
 import wandb
 import sys
-sys.path.append("/home/sidharth./codebase/")
+sys.path.append("/home/sidcs/codebase/")
 
-from wavlm_single_embedding.model import SpeakerEncoderWrapper as SingleSpeakerEncoderWrapper
+# from wavlm_single_embedding.model import SpeakerEncoderWrapper as SingleSpeakerEncoderWrapper
+from wavlm_single_embedding.model import ECAPA_TDNN as SingleSpeakerEncoderWrapper
 import random
 random.seed(42)
 import warnings
@@ -38,7 +39,7 @@ class MySpEmb(pl.LightningModule):
         lr: float = 1e-4,
         finetune_encoder: bool = False,
         emb_dim: int = 256,
-        speaker_map_path: str = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/Libriuni_03_08/Libri2Mix_ovl30to80/wav16k/min/metadata/train360_mapping.json",
+        speaker_map_path: str = "/home/sidcs/datasets/LibriMix/LibriMix/Libriuni_03_08/Libri2Mix_ovl30to80/wav16k/min/metadata/train360_mapping.json",
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -46,7 +47,7 @@ class MySpEmb(pl.LightningModule):
         # -----------------------------
         # 1. Speaker Encoder model
         # -----------------------------
-        self.model = SpeakerEncoderDualWrapper(emb_dim=emb_dim, finetune_wavlm=True)
+        self.model = SpeakerEncoderDualWrapper(emb_dim=emb_dim)
 
         # Optionally unfreeze wavlm if finetuning
         # if finetune_encoder:
@@ -61,9 +62,10 @@ class MySpEmb(pl.LightningModule):
 
         self.cosine_loss = LossWraper()
         #Get the teacher model
-        self.single_sp_model = SingleSpeakerEncoderWrapper(emb_dim=emb_dim)
-        teacher_ckpt_path = "/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_tr360/best-epoch=62-val_separation=0.000.ckpt"
-
+        # self.single_sp_model = SingleSpeakerEncoderWrapper(emb_dim=emb_dim)
+        self.single_sp_model = SingleSpeakerEncoderWrapper(C=1024)
+        # teacher_ckpt_path = "/home/sidcs/model_ckpts/librispeech_asp_wavlm_tr360/best-epoch=62-val_separation=0.000.ckpt"
+        teacher_ckpt_path = "/home/sidcs/model_ckpts/ecapa_tdnn_arcface_tr360/best-epoch=30-val_separation=0.000.ckpt"
         ckpt = torch.load(teacher_ckpt_path, map_location="cpu")
         state = ckpt["state_dict"]
 
@@ -223,14 +225,14 @@ class MySpEmb(pl.LightningModule):
 # MAIN
 # ---------------------------------------
 if __name__ == "__main__":
-    DATA_ROOT = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix" 
-    SPEAKER_MAP = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/Libriuni_05_08/Libri2Mix_ovl50to80/wav16k/min/metadata/train360_mapping.json"
+    DATA_ROOT = "/home/sidcs/datasets/LibriMix/LibriMix" 
+    SPEAKER_MAP = "/home/sidcs/datasets/LibriMix/LibriMix/Libriuni_05_08/Libri2Mix_ovl50to80/wav16k/min/metadata/train360_mapping.json"
 
 
     dm = LibriMixDataModule(
         data_root=DATA_ROOT,
         speaker_map_path=SPEAKER_MAP,
-        batch_size=32, 
+        batch_size=32*4, 
         num_workers=20, # Set this to your preference
         num_speakers=2
     )
@@ -244,10 +246,10 @@ if __name__ == "__main__":
 
     wandb_logger = WandbLogger(
         project="librispeech-speaker-encoder",
-        name="ft_wavlm_linear_dualemb_tr360",
+        name="ECAPA_UNMIX_2048_teacher_ECAPA",
         # name='test_run',
         log_model=False,
-        save_dir="/mnt/disks/data/model_ckpts/librispeech_asp_ft_wavlm_linear_dualemb_tr360/wandb_logs",
+        save_dir="/home/sidcs/model_ckpts/ECAPA_UNMIX_2048_teacher_ECAPA/wandb_logs",
     )
 
     ckpt = pl.callbacks.ModelCheckpoint(
@@ -255,14 +257,15 @@ if __name__ == "__main__":
         mode="min",
         save_top_k=1,
         filename="best-{epoch}-{val_separation:.3f}",
-        dirpath="/mnt/disks/data/model_ckpts/librispeech_asp_ft_wavlm_linear_dualemb_tr360/"
+        dirpath="/home/sidcs/model_ckpts/ECAPA_UNMIX_2048_teacher_ECAPA/"
     )
 
     trainer = pl.Trainer(
         strategy="ddp_find_unused_parameters_true",
         accelerator="gpu",
         devices=[0, 1, 2, 3],
-        max_epochs=50,
+
+        max_epochs=150,
         logger=wandb_logger,
         callbacks=[ckpt],
         gradient_clip_val=5.0,
@@ -290,5 +293,6 @@ if __name__ == "__main__":
     #     num_sanity_val_steps=0,
     # )
     trainer.fit(model, datamodule=dm)
+    # trainer.fit(model, datamodule=dm, ckpt_path='/home/sidcs/model_ckpts/librispeech_asp_ft_ecapa_linear_dualemb_tr360/best-epoch=49-val_separation=0.000.ckpt')
     # trainer.validate(model, datamodule=dm)
     wandb.finish()

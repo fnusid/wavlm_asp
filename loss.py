@@ -39,6 +39,7 @@ class CosineSimilarityLoss(nn.Module):
         gt   = F.normalize(gt,   p=2, dim=-1)   # [B,2,D]
 
         # Cosine similarity matrix: [B,2,2]
+
         cos = torch.matmul(pred, gt.transpose(1, 2))
 
         batch_size = cos.size(0)

@@ -1,0 +1,4 @@
+[default]
+entity = fnusid
+project = librispeech-speaker-encoder
+
