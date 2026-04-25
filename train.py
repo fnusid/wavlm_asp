@@ -4,218 +4,306 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import pytorch_lightning as pl
-import matplotlib.pyplot as plt
 
 from pytorch_lightning.loggers import WandbLogger
 from torch.optim.lr_scheduler import ReduceLROnPlateau
-
-from dataset import LibriMixDataModule       
-from model import SpeakerEncoderDualWrapper   
-from loss import LossWraper
-from metrics import EmbeddingMetrics
 import wandb
-import sys
-sys.path.append("/home/sidcs/codebase/")
 
-# from wavlm_single_embedding.model import SpeakerEncoderWrapper as SingleSpeakerEncoderWrapper
-from wavlm_single_embedding.model import ECAPA_TDNN as SingleSpeakerEncoderWrapper
-import random
-random.seed(42)
-import warnings
-warnings.filterwarnings("ignore")
+# Your codebase
+from dataset import LibriMixDataModule   # MUST yield vad_targets: [B,2,T_frames]
+from model import SpeakerEncoderDualWrapper
 
-def strip_model_prefix(state):
+
+# -----------------------------
+# Helper: load student checkpoint weights into self.model
+# -----------------------------
+def strip_dual_model_weights(state_dict):
+    """
+    Keeps only keys under "model." and strips that prefix.
+    Drops any teacher / arcface keys if present.
+    """
     new_state = {}
-    for k, v in state.items():
-        if k.startswith("model."):
-            new_state[k[len("model."):]] = v   # remove "model."
-        else:
-            new_state[k] = v
+    for k, v in state_dict.items():
+        if not k.startswith("model."):
+            continue
+        k2 = k.replace("model.", "", 1)
+        if k2.startswith("single_sp_model.") or k2.startswith("arcface_loss."):
+            continue
+        new_state[k2] = v
     return new_state
 
-class MySpEmb(pl.LightningModule):
+
+# -----------------------------
+# VAD head module
+# -----------------------------
+class FrameVADHead(nn.Module):
+    """
+    Input:  [B, D, T]
+    Output: [B, T] logits
+    """
+    def __init__(self, d_in: int, hidden: int = 256):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv1d(d_in, hidden, kernel_size=1),
+            nn.ReLU(),
+            nn.Conv1d(hidden, 1, kernel_size=1),
+        )
+
+    def forward(self, x):
+        return self.net(x).squeeze(1)  # [B, T]
+
+
+# -----------------------------
+# Lightning module: VAD-only training (Option A)
+# -----------------------------
+class MyVADOnly(pl.LightningModule):
     def __init__(
         self,
         lr: float = 1e-4,
-        finetune_encoder: bool = False,
         emb_dim: int = 256,
-        speaker_map_path: str = "/home/sidcs/datasets/LibriMix/LibriMix/Libriuni_03_08/Libri2Mix_ovl30to80/wav16k/min/metadata/train360_mapping.json",
+        ckpt_student_path: str = "",
+        vad_hidden: int = 256,
     ):
         super().__init__()
         self.save_hyperparameters()
 
-        # -----------------------------
-        # 1. Speaker Encoder model
-        # -----------------------------
+        # ---- Base dual model (student) ----
         self.model = SpeakerEncoderDualWrapper(emb_dim=emb_dim)
 
-        # Optionally unfreeze wavlm if finetuning
-        # if finetune_encoder:
-        #     self.model.wavlm.requires_grad_(True)
+        # ---- VAD heads on pre-pooling streams ----
+        self.vad_head1 = FrameVADHead(d_in=emb_dim, hidden=vad_hidden)
+        self.vad_head2 = FrameVADHead(d_in=emb_dim, hidden=vad_hidden)
 
-        # -----------------------------
-        # 2. ArcFace classification head
-        # -----------------------------
-        with open(speaker_map_path, "r") as f:
-            speaker_map = json.load(f)
+        # ---- Load pretrained student checkpoint ----
+        if ckpt_student_path and os.path.isfile(ckpt_student_path):
+            ckpt = torch.load(ckpt_student_path, map_location="cpu")
+            state = ckpt.get("state_dict", ckpt)
+            state = strip_dual_model_weights(state)
+            missing, unexpected = self.model.load_state_dict(state, strict=False)
+            print(f"[Student CKPT] loaded. missing={len(missing)} unexpected={len(unexpected)}")
+        else:
+            raise FileNotFoundError(f"Student checkpoint not found: {ckpt_student_path}")
 
+        # ---- Freeze base (Option A) ----
+        for p in self.model.parameters():
+            p.requires_grad = False
 
-        self.cosine_loss = LossWraper()
-        #Get the teacher model
-        # self.single_sp_model = SingleSpeakerEncoderWrapper(emb_dim=emb_dim)
-        self.single_sp_model = SingleSpeakerEncoderWrapper(C=1024)
-        # teacher_ckpt_path = "/home/sidcs/model_ckpts/librispeech_asp_wavlm_tr360/best-epoch=62-val_separation=0.000.ckpt"
-        teacher_ckpt_path = "/home/sidcs/model_ckpts/ecapa_tdnn_arcface_tr360/best-epoch=30-val_separation=0.000.ckpt"
-        ckpt = torch.load(teacher_ckpt_path, map_location="cpu")
-        state = ckpt["state_dict"]
+        # ---- Ensure VAD heads trainable ----
+        for p in self.vad_head1.parameters():
+            p.requires_grad = True
+        for p in self.vad_head2.parameters():
+            p.requires_grad = True
 
-        filtered = {}
-        for k, v in state.items():
-            # only keep model.encoder.* or model.wavlm.*, model.projector.*, model.pooling.*
-            if k.startswith("model.") and ("arcface" not in k):
-                filtered[k.replace("model.", "", 1)] = v
+        # storage for test aggregation
+        self._test_loss_sum = 0.0
+        self._test_acc_sum = 0.0
+        self._test_f1_sum = 0.0
+        self._test_batches = 0
 
-        print("Loaded teacher keys:", len(filtered))
-
-        self.single_sp_model.load_state_dict(filtered, strict=True)
-        self.single_sp_model.eval()
-        for param in self.single_sp_model.parameters():
-            param.requires_grad = False
-
-
-
-        # -----------------------------
-        # 3. Embedding metrics (for validation)
-        # -----------------------------
-        self.metrics = EmbeddingMetrics(device="cuda")  # will overwrite device at runtime
-
-    def forward(self, wav):
+    def forward_features(self, wav):
         """
-        wav: [B, T] (or [B, 1, T])
-        returns: [B, 2, emb_dim]
+        Extract per-frame features BEFORE pooling.
+        Returns:
+          proj1, proj2: [B, emb_dim, T_frames]
         """
-        return self.model(wav)
+        if wav.dim() == 3:  # [B, 1, T]
+            wav = wav.squeeze(1)
 
-    # -----------------------------
-    # TRAINING
-    # -----------------------------
+        # ECAPA encoder returns [B, 1536, T_frames]
+        feats = self.model.encoder(wav)            # [B, 1536, T_frames]
+        feats_t = feats.transpose(1, 2)            # [B, T_frames, 1536]
+        proj = self.model.projector(feats_t)       # [B, T_frames, 2*emb_dim]
+        proj1, proj2 = torch.chunk(proj, 2, dim=-1)
+        proj1 = proj1.transpose(1, 2)              # [B, emb_dim, T_frames]
+        proj2 = proj2.transpose(1, 2)              # [B, emb_dim, T_frames]
+        return proj1, proj2
+
+    @staticmethod
+    def _align_T(logits, targets):
+        """
+        logits:  [B,2,Tm]
+        targets: [B,2,Tg]
+        -> crop to min T
+        """
+        Tm = logits.shape[-1]
+        Tg = targets.shape[-1]
+        if Tm != Tg:
+            T = min(Tm, Tg)
+            logits = logits[..., :T]
+            targets = targets[..., :T]
+        return logits, targets
+
+    @staticmethod
+    def _pit_best_targets_from_losses(vad_targets, loss_direct, loss_swap):
+        """
+        vad_targets: [B,2,T]
+        loss_direct/loss_swap: [B]
+        returns targets_best: [B,2,T], use_swap mask [B]
+        """
+        use_swap = (loss_swap < loss_direct)  # [B]
+        targets_best = vad_targets.clone()
+        if use_swap.any():
+            targets_best[use_swap] = vad_targets[use_swap][:, [1, 0], :]
+        return targets_best, use_swap
+
+    @staticmethod
+    def _frame_metrics_from_logits(logits, targets_best):
+        """
+        logits: [B,2,T]
+        targets_best: [B,2,T]
+        returns acc, f1 (scalars)
+        """
+        probs = torch.sigmoid(logits)
+        pred = (probs > 0.5).float()
+
+        acc = (pred == targets_best).float().mean()
+
+        tp = (pred * targets_best).sum()
+        fp = (pred * (1.0 - targets_best)).sum()
+        fn = ((1.0 - pred) * targets_best).sum()
+        f1 = (2.0 * tp) / (2.0 * tp + fp + fn + 1e-8)
+
+        return acc, f1
+
     def training_step(self, batch, batch_idx):
         """
-        batch: (wav, speaker_label)
-          wav: [B, T]
-          labels: [B, 2]  (speaker IDs, already mapped to [0..num_classes-1])
+        Expect batch:
+          mix:         [B, T]
+          source:      [B, 2, T]         (ignored)
+          labels:      [B, 2]            (ignored)
+          vad_targets: [B, 2, T_frames]
         """
-        mix, source, labels = batch
-        emb = self.forward(mix)                    # [B, 2, emb_dim]
-        #change here
-        with torch.no_grad():
-            emb1 = self.single_sp_model(source[:, 0, :])  # [B, emb_dim]
-            emb2 = self.single_sp_model(source[:, 1, :])  # [B, emb_dim]
-            gt_embs = torch.stack([emb1, emb2], dim=1)  # [B, 2, emb_dim]
-        
-        loss = self.cosine_loss(emb, gt_embs)
-        if batch_idx == 0 and self.current_epoch == 0:
-            with torch.no_grad():
-                cos_gt = F.cosine_similarity(gt_embs[:,0,:], gt_embs[:,1,:], dim=-1).mean()
-                cos_pred = F.cosine_similarity(emb[:,0,:], emb[:,1,:], dim=-1).mean()
-                print("Mean cos(gt1, gt2) =", cos_gt.item())
-                print("Mean cos(pred1, pred2) =", cos_pred.item())
+        if len(batch) != 4:
+            raise ValueError("Batch must be (mix, source, labels, vad_targets).")
 
-        self.log(
-            "train/loss",
-            loss,
-            on_step=True,
-            on_epoch=True,
-            prog_bar=True,
-            logger=True,
-            batch_size=mix.shape[0],
-        )
+        mix, _, _, vad_targets = batch
+        vad_targets = vad_targets.float()  # [B,2,Tg]
+
+        # ---- Feature extraction (frozen base) ----
+        with torch.no_grad():
+            proj1, proj2 = self.forward_features(mix)  # [B,256,Tm] each
+
+        # ---- VAD logits ----
+        logit1 = self.vad_head1(proj1)  # [B,Tm]
+        logit2 = self.vad_head2(proj2)  # [B,Tm]
+        logits = torch.stack([logit1, logit2], dim=1)  # [B,2,Tm]
+
+        logits, vad_targets = self._align_T(logits, vad_targets)
+
+        # ---- PIT-BCE (per-sample) ----
+        loss_direct = F.binary_cross_entropy_with_logits(
+            logits, vad_targets, reduction="none"
+        ).mean(dim=(1, 2))  # [B]
+
+        vad_swapped = vad_targets[:, [1, 0], :]
+        loss_swap = F.binary_cross_entropy_with_logits(
+            logits, vad_swapped, reduction="none"
+        ).mean(dim=(1, 2))  # [B]
+
+        loss_per_sample = torch.minimum(loss_direct, loss_swap)
+        loss = loss_per_sample.mean()
+        swap_rate = (loss_swap < loss_direct).float().mean()
+
+        self.log("train/vad_loss", loss, on_step=True, on_epoch=True, prog_bar=True, logger=True, batch_size=mix.shape[0])
+        self.log("train/pit_swap_rate", swap_rate, on_step=True, on_epoch=True, prog_bar=False, logger=True, batch_size=mix.shape[0])
+
         return loss
 
-    # -----------------------------
-    # VALIDATION (per-batch)
-    # -----------------------------
-
-    def on_validation_epoch_start(self):
-        self.val_embs = []
-        self.val_labels = []
-
     def validation_step(self, batch, batch_idx):
-        """
-        For now we just compute arcface loss as a simple val loss.
-        The clustering metrics are done in validation_epoch_end
-        on the entire validation set.
-        """
-        mix, source, labels = batch
-        emb = self.forward(mix)                   # [B, 2, emb_dim]
-        #labels : [B, 2]
+        if len(batch) != 4:
+            raise ValueError("Val batch must be (mix, source, labels, vad_targets).")
 
-        self.val_embs.append(emb.detach().cpu())
-        self.val_labels.append(labels.detach().cpu())
+        mix, _, _, vad_targets = batch
+        vad_targets = vad_targets.float()
 
+        with torch.no_grad():
+            proj1, proj2 = self.forward_features(mix)
 
-        return {'emb': emb, 'labels': labels}
+        logit1 = self.vad_head1(proj1)
+        logit2 = self.vad_head2(proj2)
+        logits = torch.stack([logit1, logit2], dim=1)
 
-    # -----------------------------
-    # VALIDATION (end of epoch)
-    # -----------------------------
-    def on_validation_epoch_end(self):
-        if not self.trainer.is_global_zero:
-            return
+        logits, vad_targets = self._align_T(logits, vad_targets)
 
-        # [num_batches, B, 2, D] → [total_B, 2, D]
-        val_embs = torch.cat(self.val_embs, dim=0)      # [B_total, 2, D]
-        val_labels = torch.cat(self.val_labels, dim=0)  # [B_total, 2]
+        loss_direct = F.binary_cross_entropy_with_logits(logits, vad_targets, reduction="none").mean(dim=(1, 2))
+        loss_swap   = F.binary_cross_entropy_with_logits(logits, vad_targets[:, [1, 0], :], reduction="none").mean(dim=(1, 2))
+        loss = torch.minimum(loss_direct, loss_swap).mean()
 
-        # flatten: each speaker is a separate point
-        B_total, S, D = val_embs.shape                  # S=2
-        embs_flat = val_embs.reshape(B_total * S, D)    # [N, D]
-        labels_flat = val_labels.reshape(-1)            # [N]
+        targets_best, use_swap = self._pit_best_targets_from_losses(vad_targets, loss_direct, loss_swap)
+        acc, f1 = self._frame_metrics_from_logits(logits, targets_best)
+        swap_rate = use_swap.float().mean()
 
-        # skip useless metrics
-        if torch.unique(labels_flat).numel() < 2:
-            print(labels_flat)
-            print("Only one unique speaker in val set, skipping metrics.")
-            return
+        self.log("val/vad_loss", loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, batch_size=mix.shape[0])
+        self.log("val/vad_acc", acc, on_step=False, on_epoch=True, prog_bar=True, logger=True, batch_size=mix.shape[0])
+        self.log("val/vad_f1", f1, on_step=False, on_epoch=True, prog_bar=True, logger=True, batch_size=mix.shape[0])
+        self.log("val/pit_swap_rate", swap_rate, on_step=False, on_epoch=True, prog_bar=False, logger=True, batch_size=mix.shape[0])
 
-        # compute metrics
-        results = self.metrics.compute_from_tensors(
-            embs_flat.cpu(),
-            labels_flat.cpu(),
-        )
-
-        # logging
-        for k, v in results.items():
-            if k == "tsne_fig":
-                continue
-            self.log(f"val/{k}", v, on_epoch=True, prog_bar=True, logger=True)
-
-        # clear cache
-        self.val_embs = []
-        self.val_labels = []
-
-
+        return {"val_loss": loss}
 
     # -----------------------------
-    # OPTIMIZER + SCHEDULER
+    # TEST (requested)
     # -----------------------------
+    def on_test_epoch_start(self):
+        self._test_loss_sum = 0.0
+        self._test_acc_sum = 0.0
+        self._test_f1_sum = 0.0
+        self._test_batches = 0
+
+    def test_step(self, batch, batch_idx):
+        if len(batch) != 4:
+            raise ValueError("Test batch must be (mix, source, labels, vad_targets).")
+
+        mix, _, _, vad_targets = batch
+        vad_targets = vad_targets.float()
+
+        with torch.no_grad():
+            proj1, proj2 = self.forward_features(mix)
+
+        logit1 = self.vad_head1(proj1)
+        logit2 = self.vad_head2(proj2)
+        logits = torch.stack([logit1, logit2], dim=1)
+
+        logits, vad_targets = self._align_T(logits, vad_targets)
+
+        loss_direct = F.binary_cross_entropy_with_logits(logits, vad_targets, reduction="none").mean(dim=(1, 2))
+        loss_swap   = F.binary_cross_entropy_with_logits(logits, vad_targets[:, [1, 0], :], reduction="none").mean(dim=(1, 2))
+        loss = torch.minimum(loss_direct, loss_swap).mean()
+
+        targets_best, use_swap = self._pit_best_targets_from_losses(vad_targets, loss_direct, loss_swap)
+        acc, f1 = self._frame_metrics_from_logits(logits, targets_best)
+        swap_rate = use_swap.float().mean()
+
+        # per-step logs
+        self.log("test/vad_loss", loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, batch_size=mix.shape[0])
+        self.log("test/vad_acc", acc, on_step=False, on_epoch=True, prog_bar=True, logger=True, batch_size=mix.shape[0])
+        self.log("test/vad_f1", f1, on_step=False, on_epoch=True, prog_bar=True, logger=True, batch_size=mix.shape[0])
+        self.log("test/pit_swap_rate", swap_rate, on_step=False, on_epoch=True, prog_bar=False, logger=True, batch_size=mix.shape[0])
+
+        # manual aggregation too (robust even if you change logging later)
+        self._test_loss_sum += float(loss.detach().cpu())
+        self._test_acc_sum += float(acc.detach().cpu())
+        self._test_f1_sum += float(f1.detach().cpu())
+        self._test_batches += 1
+
+        return {"test_loss": loss}
+
+    def on_test_epoch_end(self):
+        if self._test_batches > 0:
+            mean_loss = self._test_loss_sum / self._test_batches
+            mean_acc = self._test_acc_sum / self._test_batches
+            mean_f1 = self._test_f1_sum / self._test_batches
+            print(f"[TEST] mean_loss={mean_loss:.4f} mean_acc={mean_acc:.4f} mean_f1={mean_f1:.4f}")
+
     def configure_optimizers(self):
-        optimizer = torch.optim.AdamW(self.parameters(), lr=self.hparams.lr, weight_decay=0.01)
-        # return optimizer
-
-        # monitor one of the embedding metrics, e.g., separation (higher is better)
-        scheduler = ReduceLROnPlateau(
-            optimizer,
-            mode="min",
-            factor=0.5,
-            patience=3,
-        )
+        params = list(self.vad_head1.parameters()) + list(self.vad_head2.parameters())
+        optimizer = torch.optim.AdamW(params, lr=self.hparams.lr, weight_decay=0.01)
+        scheduler = ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=3)
 
         return {
             "optimizer": optimizer,
             "lr_scheduler": {
                 "scheduler": scheduler,
-                "monitor": "train/loss",
+                "monitor": "val/vad_loss",
                 "interval": "epoch",
             },
         }
@@ -225,74 +313,61 @@ class MySpEmb(pl.LightningModule):
 # MAIN
 # ---------------------------------------
 if __name__ == "__main__":
-    DATA_ROOT = "/home/sidcs/datasets/LibriMix/LibriMix" 
+    DATA_ROOT = "/home/sidcs/datasets/LibriMix/LibriMix"
     SPEAKER_MAP = "/home/sidcs/datasets/LibriMix/LibriMix/Libriuni_05_08/Libri2Mix_ovl50to80/wav16k/min/metadata/train360_mapping.json"
 
+    # pretrained dual-embedding checkpoint (student)
+    STUDENT_CKPT = "/home/sidcs/model_ckpts/ECAPA_UNMIX_3072_teacher_ECAPA/best-epoch=87-val_separation=0.000.ckpt"
 
     dm = LibriMixDataModule(
         data_root=DATA_ROOT,
         speaker_map_path=SPEAKER_MAP,
-        batch_size=32*4, 
-        num_workers=20, # Set this to your preference
-        num_speakers=2
+        batch_size=32 * 4,
+        num_workers=20,
+        num_speakers=2,
     )
 
-    model = MySpEmb(
+    model = MyVADOnly(
         lr=1e-4,
-        finetune_encoder=False,
         emb_dim=256,
-        speaker_map_path=SPEAKER_MAP,   # ONLY train map here
+        ckpt_student_path=STUDENT_CKPT,
+        vad_hidden=256,
     )
 
     wandb_logger = WandbLogger(
-        project="librispeech-speaker-encoder",
-        name="ECAPA_UNMIX_2048_teacher_ECAPA",
-        # name='test_run',
+        project="librispeech-vad-head",
+        name="VAD_only_on_pretrained_dualemb",
         log_model=False,
-        save_dir="/home/sidcs/model_ckpts/ECAPA_UNMIX_2048_teacher_ECAPA/wandb_logs",
+        save_dir="/home/sidcs/model_ckpts/VAD_only_on_pretrained_dualemb/wandb_logs",
     )
 
-    ckpt = pl.callbacks.ModelCheckpoint(
-        monitor="train/loss",
+    ckpt_cb = pl.callbacks.ModelCheckpoint(
+        monitor="val/vad_loss",
         mode="min",
         save_top_k=1,
-        filename="best-{epoch}-{val_separation:.3f}",
-        dirpath="/home/sidcs/model_ckpts/ECAPA_UNMIX_2048_teacher_ECAPA/"
+        filename="best-{epoch}-{val_vad_loss:.4f}",
+        dirpath="/home/sidcs/model_ckpts/VAD_only_on_pretrained_dualemb/",
     )
 
     trainer = pl.Trainer(
         strategy="ddp_find_unused_parameters_true",
         accelerator="gpu",
-        devices=[0, 1, 2, 3],
-
-        max_epochs=150,
+        devices=[0],           # change to [0,1,2,3] when ready
+        max_epochs=50,
         logger=wandb_logger,
-        callbacks=[ckpt],
+        callbacks=[ckpt_cb],
         gradient_clip_val=5.0,
         enable_checkpointing=True,
+        num_sanity_val_steps=0,  # avoids failing early if your val/test dataset is still being wired
     )
 
-    # trainer = pl.Trainer(
-    #     accelerator='gpu',
-    #     devices=[0],
-    #     max_epochs=100,
-    #     logger=wandb_logger,
-    #     overfit_batches=1,
-    #     limit_train_batches=1,
-    #     limit_val_batches=1,
-    #     num_sanity_val_steps=0,
-    #     enable_checkpointing=False,
-    # )
+    # trainer.fit(model, datamodule=dm)
 
-    # trainer = pl.Trainer(
-    #     accelerator="gpu",
-    #     devices=1,
-    #     max_epochs=1,
-    #     limit_train_batches=1,
-    #     limit_val_batches=1,
-    #     num_sanity_val_steps=0,
-    # )
-    trainer.fit(model, datamodule=dm)
-    # trainer.fit(model, datamodule=dm, ckpt_path='/home/sidcs/model_ckpts/librispeech_asp_ft_ecapa_linear_dualemb_tr360/best-epoch=49-val_separation=0.000.ckpt')
-    # trainer.validate(model, datamodule=dm)
+    # If your LibriMixDataModule has test_dataset/test_dataloader, this will run.
+    # Otherwise add it similarly to your val_dataset/val_dataloader.
+    try:
+        trainer.test(model, datamodule=dm, ckpt_path="/home/sidcs/model_ckpts/VAD_only_on_pretrained_dualemb/best-epoch=30-val_vad_loss=0.0000.ckpt")
+    except Exception as e:
+        print("[WARN] trainer.test skipped / failed:", repr(e))
+
     wandb.finish()

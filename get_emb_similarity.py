@@ -406,7 +406,8 @@ if __name__ == "__main__":
     META = "/home/sidcs/datasets/LibriMix/LibriMix/Libriuni_05_08/Libri2Mix_ovl50to80/wav16k/min/metadata/mixture_test_mix_clean.csv"
 
     # CKPT = "/home/sidcs/model_ckpts/ECAPA_UNMIX_2048_teacher_ECAPA/best-epoch=117-val_separation=0.000.ckpt"
-    CKPT = "/home/sidcs/model_ckpts/librispeech_asp_ft_ecapa_linear_dualemb_tr360/best-epoch=144-val_separation=0.000.ckpt"
+    # CKPT = "/home/sidcs/model_ckpts/librispeech_asp_ft_ecapa_linear_dualemb_tr360/best-epoch=144-val_separation=0.000.ckpt"
+    CKPT = "/home/sidcs/model_ckpts/ECAPA_UNMIX_3072_teacher_ECAPA/best-epoch=141-val_separation=0.000.ckpt"
     TEACHER_CKPT = "/home/sidcs/model_ckpts/ecapa_tdnn_arcface_tr360/best-epoch=30-val_separation=0.000.ckpt"
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -472,4 +473,4 @@ if __name__ == "__main__":
     print(f"silhouette    = {res['silhouette']:.4f}")
 
     # Optional TSNE:
-    plot_tsne_subset(embs, labels, num_speakers=20, save_path="/home/sidcs/codebase/wavlm_dual_embedding/analysis/tsne_ecapa/tsne_subset_ecapa1024.png")
+    plot_tsne_subset(embs, labels, num_speakers=20, save_path="/home/sidcs/codebase/wavlm_dual_embedding/analysis/tsne_ecapa/tsne_subset_ecapa3072.png")

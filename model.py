@@ -202,13 +202,14 @@ class SpeakerEncoderDualWrapper(nn.Module):
     For Phase 1: this is actually a speaker encoder
     using WavLM + projection + ASP.
     """
-    def __init__(self, emb_dim=256):
+    def __init__(self, emb_dim=256, vad_hidden=128):
         super().__init__()
 
         # Load WavLM
-       
+        self.encoder = ECAPA_TDNN_encoder(C=3072)
         # self.encoder = ECAPA_TDNN_encoder(C=2048)
-        self.encoder = ECAPA_TDNN_encoder(C=1024)
+        # self.encoder = ECAPA_TDNN_encoder(C=1024)
+       
         self.emb_dim = emb_dim
 
         # Linear 768 -> 256
@@ -218,7 +219,18 @@ class SpeakerEncoderDualWrapper(nn.Module):
         self.encoder1 = SpeakerEncoder(feat_dim=emb_dim, emb_dim=emb_dim)
         self.encoder2 = SpeakerEncoder(feat_dim=emb_dim, emb_dim=emb_dim)
 
-    def forward(self, audio):
+        self.vad_head1 = nn.Sequential(
+            nn.Conv1d(emb_dim, vad_hidden, kernel_size=1),
+            nn.ReLU(),
+            nn.Conv1d(vad_hidden, 1, kernel_size=1),
+        )
+        self.vad_head2 = nn.Sequential(
+            nn.Conv1d(emb_dim, vad_hidden, kernel_size=1),
+            nn.ReLU(),
+            nn.Conv1d(vad_hidden, 1, kernel_size=1),
+        )
+
+    def forward(self, audio, return_vad=False):
         """
         mix_audio: [B, T]
         """
@@ -244,7 +256,16 @@ class SpeakerEncoderDualWrapper(nn.Module):
         emb1 = self.encoder1(proj1)       # [B, 256]
         emb2 = self.encoder2(proj2)       # [B, 256]
         emb = torch.stack([emb1, emb2], dim=1) #[B,2,256]
-        return emb
+
+        if not return_vad:
+        
+            return emb
+
+        else:
+            vad1 = self.vad_head1(proj1)
+            vad2 = self.vad_head2(proj2)
+            vad_logits = torch.stack([vad1, vad2], dim=1)   # [B, 2, T]
+            return emb, vad_logits
 
 
 if __name__ == "__main__":
