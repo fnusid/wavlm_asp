@@ -208,7 +208,8 @@ class SpeakerEncoderDualWrapper(nn.Module):
         # Load WavLM
        
         # self.encoder = ECAPA_TDNN_encoder(C=2048)
-        self.encoder = ECAPA_TDNN_encoder(C=1024)
+        # self.encoder = ECAPA_TDNN_encoder(C=1024)
+        self.encoder = ECAPA_TDNN_encoder(C=3072)
         self.emb_dim = emb_dim
 
         # Linear 768 -> 256
