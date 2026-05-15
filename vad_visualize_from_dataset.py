@@ -9,25 +9,26 @@ import matplotlib.pyplot as plt
 # Your codebase
 from dataset import LibriMixDataModule            # must yield: (mix, sources, labels, vad_targets[B,2,T])
 from model import SpeakerEncoderDualWrapper       # your dual embedding model (ECAPA-based)
+from pvad_model import pVAD_module
 
-# -----------------------------
-# VAD head
-# -----------------------------
-class FrameVADHead(nn.Module):
-    """
-    Input:  [B, D, T]
-    Output: [B, T] logits
-    """
-    def __init__(self, d_in: int, hidden: int = 256):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Conv1d(d_in, hidden, kernel_size=1),
-            nn.ReLU(),
-            nn.Conv1d(hidden, 1, kernel_size=1),
-        )
+# # -----------------------------
+# # VAD head
+# # -----------------------------
+# class FrameVADHead(nn.Module):
+#     """
+#     Input:  [B, D, T]
+#     Output: [B, T] logits
+#     """
+#     def __init__(self, d_in: int, hidden: int = 256):
+#         super().__init__()
+#         self.net = nn.Sequential(
+#             nn.Conv1d(d_in, hidden, kernel_size=1),
+#             nn.ReLU(),
+#             nn.Conv1d(hidden, 1, kernel_size=1),
+#         )
 
-    def forward(self, x):
-        return self.net(x).squeeze(1)  # [B, T]
+#     def forward(self, x):
+#         return self.net(x).squeeze(1)  # [B, T]
 
 
 # -----------------------------
@@ -37,29 +38,20 @@ class FrameVADHead(nn.Module):
 #   vad_head2.*
 # -----------------------------
 class VADWrapper(nn.Module):
-    def __init__(self, emb_dim=256, vad_hidden=256):
+    def __init__(self, emb_dim=256, vad_hidden=256+80):
         super().__init__()
         self.model = SpeakerEncoderDualWrapper(emb_dim=emb_dim)   # MUST be named "model"
-        self.vad_head1 = FrameVADHead(d_in=emb_dim, hidden=vad_hidden)
-        self.vad_head2 = FrameVADHead(d_in=emb_dim, hidden=vad_hidden)
+        self.pvad = pVAD_module(hidden_dim=vad_hidden)              
 
     @torch.no_grad()
     def forward_features(self, wav: torch.Tensor):
         """
-        Returns per-frame streams BEFORE pooling:
-          proj1, proj2: [B, emb_dim, T_frames]
-        Mirrors your SpeakerEncoderDualWrapper internals.
         """
         if wav.dim() == 3:  # [B,1,T]
             wav = wav.squeeze(1)
 
-        feats = self.model.encoder(wav)          # [B, 1536, T_frames]
-        feats_t = feats.transpose(1, 2)          # [B, T_frames, 1536]
-        proj = self.model.projector(feats_t)     # [B, T_frames, 2*emb_dim]
-        proj1, proj2 = torch.chunk(proj, 2, dim=-1)
-        proj1 = proj1.transpose(1, 2)            # [B, emb_dim, T_frames]
-        proj2 = proj2.transpose(1, 2)            # [B, emb_dim, T_frames]
-        return proj1, proj2
+        emb = self.model(wav)  # [B, 2, 256]
+        return emb
 
     @torch.no_grad()
     def forward_logits(self, wav: torch.Tensor):
@@ -67,10 +59,19 @@ class VADWrapper(nn.Module):
         Returns:
           logits: [B, 2, T_frames]
         """
-        proj1, proj2 = self.forward_features(wav)
-        logit1 = self.vad_head1(proj1)           # [B, T]
-        logit2 = self.vad_head2(proj2)           # [B, T]
-        return torch.stack([logit1, logit2], dim=1)
+        emb = self.forward_features(wav)  # [B, 2, 256]
+        emb1, emb2 = emb.chunk(2, dim=1)  # [B, 256] each
+        if emb1.ndim == 3:
+            emb1 = emb1.squeeze(1)
+        if emb2.ndim == 3:
+            emb2 = emb2.squeeze(1)
+
+
+        logit1 = self.pvad(wav, emb=emb1)  # [B, T_frames]
+        logit2 = self.pvad(wav, emb=emb2)  # [B, T_frames]
+        logits = torch.stack([logit1, logit2], dim=1)  # [B, 2, T_frames]
+
+        return logits
 
 
 # -----------------------------
@@ -164,7 +165,7 @@ def main():
     ap.add_argument("--batch_size", type=int, default=8)
     ap.add_argument("--num_workers", type=int, default=4)
     ap.add_argument("--device", type=str, default="cuda")
-    ap.add_argument("--save_png", type=str, default="vad_overlay_debug.png")
+    ap.add_argument("--save_png", type=str, default="/home/sidcs/codebase/wavlm_dual_embedding/analysis/pvad/pvad_overlay_debug.png")
     args = ap.parse_args()
 
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
@@ -193,7 +194,7 @@ def main():
           "vad", tuple(vad_targets.shape))
 
     # 2) Model wrapper
-    net = VADWrapper(emb_dim=256, vad_hidden=256).to(device)
+    net = VADWrapper(emb_dim=256, vad_hidden=256+80).to(device)
     net.eval()
 
     # 3) Load CKPT (NO STRIPPING)

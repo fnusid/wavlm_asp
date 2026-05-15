@@ -12,6 +12,7 @@ import wandb
 # Your codebase
 from dataset import LibriMixDataModule   # MUST yield vad_targets: [B,2,T_frames]
 from model import SpeakerEncoderDualWrapper
+from pvad_model import pVAD_module
 
 
 # -----------------------------
@@ -33,24 +34,6 @@ def strip_dual_model_weights(state_dict):
     return new_state
 
 
-# -----------------------------
-# VAD head module
-# -----------------------------
-class FrameVADHead(nn.Module):
-    """
-    Input:  [B, D, T]
-    Output: [B, T] logits
-    """
-    def __init__(self, d_in: int, hidden: int = 256):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Conv1d(d_in, hidden, kernel_size=1),
-            nn.ReLU(),
-            nn.Conv1d(hidden, 1, kernel_size=1),
-        )
-
-    def forward(self, x):
-        return self.net(x).squeeze(1)  # [B, T]
 
 
 # -----------------------------
@@ -62,7 +45,7 @@ class MyVADOnly(pl.LightningModule):
         lr: float = 1e-4,
         emb_dim: int = 256,
         ckpt_student_path: str = "",
-        vad_hidden: int = 256,
+        vad_hidden: int = 256+80,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -70,9 +53,9 @@ class MyVADOnly(pl.LightningModule):
         # ---- Base dual model (student) ----
         self.model = SpeakerEncoderDualWrapper(emb_dim=emb_dim)
 
-        # ---- VAD heads on pre-pooling streams ----
-        self.vad_head1 = FrameVADHead(d_in=emb_dim, hidden=vad_hidden)
-        self.vad_head2 = FrameVADHead(d_in=emb_dim, hidden=vad_hidden)
+        self.pvad = pVAD_module(hidden_dim=vad_hidden)
+
+
 
         # ---- Load pretrained student checkpoint ----
         if ckpt_student_path and os.path.isfile(ckpt_student_path):
@@ -87,12 +70,6 @@ class MyVADOnly(pl.LightningModule):
         # ---- Freeze base (Option A) ----
         for p in self.model.parameters():
             p.requires_grad = False
-
-        # ---- Ensure VAD heads trainable ----
-        for p in self.vad_head1.parameters():
-            p.requires_grad = True
-        for p in self.vad_head2.parameters():
-            p.requires_grad = True
 
         # storage for test aggregation
         self._test_loss_sum = 0.0
@@ -109,14 +86,14 @@ class MyVADOnly(pl.LightningModule):
         if wav.dim() == 3:  # [B, 1, T]
             wav = wav.squeeze(1)
 
-        # ECAPA encoder returns [B, 1536, T_frames]
-        feats = self.model.encoder(wav)            # [B, 1536, T_frames]
-        feats_t = feats.transpose(1, 2)            # [B, T_frames, 1536]
-        proj = self.model.projector(feats_t)       # [B, T_frames, 2*emb_dim]
-        proj1, proj2 = torch.chunk(proj, 2, dim=-1)
-        proj1 = proj1.transpose(1, 2)              # [B, emb_dim, T_frames]
-        proj2 = proj2.transpose(1, 2)              # [B, emb_dim, T_frames]
-        return proj1, proj2
+
+        emb = self.model(wav) #[B,2,256]
+
+        # emb1, emb2 = emb[:, 0, :], emb[:, 1, :]  # each [B, 256]
+
+        # vad_logits1 = self.pvad(wav, emb1)
+        # vad_logits2 = self.pvad(wav, emb2)
+        return emb
 
     @staticmethod
     def _align_T(logits, targets):
@@ -181,11 +158,14 @@ class MyVADOnly(pl.LightningModule):
 
         # ---- Feature extraction (frozen base) ----
         with torch.no_grad():
-            proj1, proj2 = self.forward_features(mix)  # [B,256,Tm] each
+            embs = self.forward_features(mix)  # [B,2, 256]
+        
+        emb1, emb2 = embs[:, 0, :], embs[:, 1, :]  # each [B, 256]
+
 
         # ---- VAD logits ----
-        logit1 = self.vad_head1(proj1)  # [B,Tm]
-        logit2 = self.vad_head2(proj2)  # [B,Tm]
+        logit1 = self.pvad(mix, emb1)  # [B, Tm]
+        logit2 = self.pvad(mix, emb2)  # [B, Tm]
         logits = torch.stack([logit1, logit2], dim=1)  # [B,2,Tm]
 
         logits, vad_targets = self._align_T(logits, vad_targets)
@@ -217,11 +197,15 @@ class MyVADOnly(pl.LightningModule):
         vad_targets = vad_targets.float()
 
         with torch.no_grad():
-            proj1, proj2 = self.forward_features(mix)
+            embs = self.forward_features(mix)  # [B,2, 256]
+        
+        emb1, emb2 = embs[:, 0, :], embs[:, 1, :]  # each [B, 256]
 
-        logit1 = self.vad_head1(proj1)
-        logit2 = self.vad_head2(proj2)
-        logits = torch.stack([logit1, logit2], dim=1)
+
+        # ---- VAD logits ----
+        logit1 = self.pvad(mix, emb1)  # [B, Tm]
+        logit2 = self.pvad(mix, emb2)  # [B, Tm]
+        logits = torch.stack([logit1, logit2], dim=1)  # [B,2,Tm]
 
         logits, vad_targets = self._align_T(logits, vad_targets)
 
@@ -257,11 +241,15 @@ class MyVADOnly(pl.LightningModule):
         vad_targets = vad_targets.float()
 
         with torch.no_grad():
-            proj1, proj2 = self.forward_features(mix)
+            embs = self.forward_features(mix)  # [B,2, 256]
+        
+        emb1, emb2 = embs[:, 0, :], embs[:, 1, :]  # each [B, 256]
 
-        logit1 = self.vad_head1(proj1)
-        logit2 = self.vad_head2(proj2)
-        logits = torch.stack([logit1, logit2], dim=1)
+
+        # ---- VAD logits ----
+        logit1 = self.pvad(mix, emb1)  # [B, Tm]
+        logit2 = self.pvad(mix, emb2)  # [B, Tm]
+        logits = torch.stack([logit1, logit2], dim=1)  # [B,2,Tm]
 
         logits, vad_targets = self._align_T(logits, vad_targets)
 
@@ -295,7 +283,7 @@ class MyVADOnly(pl.LightningModule):
             print(f"[TEST] mean_loss={mean_loss:.4f} mean_acc={mean_acc:.4f} mean_f1={mean_f1:.4f}")
 
     def configure_optimizers(self):
-        params = list(self.vad_head1.parameters()) + list(self.vad_head2.parameters())
+        params = list(self.pvad.parameters())
         optimizer = torch.optim.AdamW(params, lr=self.hparams.lr, weight_decay=0.01)
         scheduler = ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=3)
 
@@ -322,7 +310,7 @@ if __name__ == "__main__":
     dm = LibriMixDataModule(
         data_root=DATA_ROOT,
         speaker_map_path=SPEAKER_MAP,
-        batch_size=32 * 4,
+        batch_size=32 * 16,
         num_workers=20,
         num_speakers=2,
     )
@@ -331,14 +319,14 @@ if __name__ == "__main__":
         lr=1e-4,
         emb_dim=256,
         ckpt_student_path=STUDENT_CKPT,
-        vad_hidden=256,
+        vad_hidden=256+80,
     )
 
     wandb_logger = WandbLogger(
         project="librispeech-vad-head",
-        name="VAD_only_on_pretrained_dualemb",
+        name="pvad_emb",
         log_model=False,
-        save_dir="/home/sidcs/model_ckpts/VAD_only_on_pretrained_dualemb/wandb_logs",
+        save_dir="/home/sidcs/model_ckpts/pvad_emb/wandb_logs",
     )
 
     ckpt_cb = pl.callbacks.ModelCheckpoint(
@@ -346,14 +334,14 @@ if __name__ == "__main__":
         mode="min",
         save_top_k=1,
         filename="best-{epoch}-{val_vad_loss:.4f}",
-        dirpath="/home/sidcs/model_ckpts/VAD_only_on_pretrained_dualemb/",
+        dirpath="/home/sidcs/model_ckpts/pvad_emb/",
     )
 
     trainer = pl.Trainer(
         strategy="ddp_find_unused_parameters_true",
         accelerator="gpu",
-        devices=[0],           # change to [0,1,2,3] when ready
-        max_epochs=50,
+        devices=[0,1,2,3,4,5,6],           # change to [0,1,2,3] when ready
+        max_epochs=100,
         logger=wandb_logger,
         callbacks=[ckpt_cb],
         gradient_clip_val=5.0,
@@ -361,13 +349,13 @@ if __name__ == "__main__":
         num_sanity_val_steps=0,  # avoids failing early if your val/test dataset is still being wired
     )
 
-    # trainer.fit(model, datamodule=dm)
+    trainer.fit(model, datamodule=dm, ckpt_path="/home/sidcs/model_ckpts/pvad_emb/best-epoch=47-val_vad_loss=0.0000.ckpt")
 
-    # If your LibriMixDataModule has test_dataset/test_dataloader, this will run.
-    # Otherwise add it similarly to your val_dataset/val_dataloader.
-    try:
-        trainer.test(model, datamodule=dm, ckpt_path="/home/sidcs/model_ckpts/VAD_only_on_pretrained_dualemb/best-epoch=30-val_vad_loss=0.0000.ckpt")
-    except Exception as e:
-        print("[WARN] trainer.test skipped / failed:", repr(e))
+    # # If your LibriMixDataModule has test_dataset/test_dataloader, this will run.
+    # # Otherwise add it similarly to your val_dataset/val_dataloader.
+    # try:
+    #     trainer.test(model, datamodule=dm, ckpt_path="/home/sidcs/model_ckpts/VAD_only_on_pretrained_dualemb/best-epoch=30-val_vad_loss=0.0000.ckpt")
+    # except Exception as e:
+    #     print("[WARN] trainer.test skipped / failed:", repr(e))
 
-    wandb.finish()
+    # wandb.finish()

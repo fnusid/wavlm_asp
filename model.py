@@ -133,7 +133,7 @@ class ECAPA_TDNN_encoder(nn.Module):
         self.torchfbank = torch.nn.Sequential(
             PreEmphasis(),            
             torchaudio.transforms.MelSpectrogram(sample_rate=16000, n_fft=512, win_length=400, hop_length=160, \
-                                                 f_min = 20, f_max = 7600, window_fn=torch.hamming_window, n_mels=80),
+                                                 f_min = 20, f_max = 7600, window_fn=torch.hamming_window, n_mels=80), #25ms window, 10ms hop, 80 mel bins
             )
 
         self.specaug = FbankAug() # Spec augmentation
@@ -158,14 +158,26 @@ class ECAPA_TDNN_encoder(nn.Module):
         self.fc6 = nn.Linear(3072, 256)
         self.bn6 = nn.BatchNorm1d(256)
 
+    def extract_logmel(self, x, aug=False):
+        '''
+        x: waveform [B, T]
+        returns: log-mel spectrogram [B, 80, T_frames]
 
-    def forward(self, x, aug=False):
+        '''
         with torch.no_grad():
-            x = self.torchfbank(x)+1e-6
-            x = x.log()   
+            x = self.torchfbank(x) + 1e-6
+            x = x.log()
             x = x - torch.mean(x, dim=-1, keepdim=True)
-            if aug == True:
+
+            if aug:
                 x = self.specaug(x)
+
+        return x
+
+    def forward_features(self, x):
+        '''
+        x: log-mel spectrogram [B, 80, T_frames]
+        '''
         x = self.conv1(x)
         x = self.relu(x)
         x = self.bn1(x)
@@ -176,9 +188,33 @@ class ECAPA_TDNN_encoder(nn.Module):
 
         x = self.layer4(torch.cat((x1,x2,x3),dim=1))
         x = self.relu(x) #[B, 1536, T]
-
         return x
 
+    # def forward(self, x, aug=False):
+    #     with torch.no_grad():
+    #         x = self.torchfbank(x)+1e-6
+    #         x = x.log()   
+    #         x = x - torch.mean(x, dim=-1, keepdim=True)
+    #         if aug == True:
+    #             x = self.specaug(x)
+    #     # breakpoint() #x: [B, feat, T]
+    #     x = self.conv1(x)
+    #     x = self.relu(x)
+    #     x = self.bn1(x)
+
+    #     x1 = self.layer1(x)
+    #     x2 = self.layer2(x+x1)
+    #     x3 = self.layer3(x+x1+x2)
+
+    #     x = self.layer4(torch.cat((x1,x2,x3),dim=1))
+    #     x = self.relu(x) #[B, 1536, T]
+
+    #     return x
+
+    def forward(self, x, aug=False):
+        x = self.extract_logmel(x, aug=aug)
+        x = self.forward_features(x)
+        return x
 
 
 
@@ -219,57 +255,85 @@ class SpeakerEncoderDualWrapper(nn.Module):
         self.encoder1 = SpeakerEncoder(feat_dim=emb_dim, emb_dim=emb_dim)
         self.encoder2 = SpeakerEncoder(feat_dim=emb_dim, emb_dim=emb_dim)
 
-        self.vad_head1 = nn.Sequential(
-            nn.Conv1d(emb_dim, vad_hidden, kernel_size=1),
-            nn.ReLU(),
-            nn.Conv1d(vad_hidden, 1, kernel_size=1),
-        )
-        self.vad_head2 = nn.Sequential(
-            nn.Conv1d(emb_dim, vad_hidden, kernel_size=1),
-            nn.ReLU(),
-            nn.Conv1d(vad_hidden, 1, kernel_size=1),
-        )
-
-    def forward(self, audio, return_vad=False):
+        # self.vad_head1 = nn.Sequential(
+        #     nn.Conv1d(emb_dim, vad_hidden, kernel_size=1),
+        #     nn.ReLU(),
+        #     nn.Conv1d(vad_hidden, 1, kernel_size=1),
+        # )
+        # self.vad_head2 = nn.Sequential(
+        #     nn.Conv1d(emb_dim, vad_hidden, kernel_size=1),
+        #     nn.ReLU(),
+        #     nn.Conv1d(vad_hidden, 1, kernel_size=1),
+        # )
+    def forward_from_features(self, feats):
         """
-        mix_audio: [B, T]
+        feats: [B, T_frames, feat_dim]
+        returns: [B, 2, emb_dim]
         """
-        if audio.dim() == 3:  # [B, 1, T]
-            audio = audio.squeeze(1)
+        feats = self.encoder.forward_features(feats).transpose(1, 2)   # [B, T, 1536]
 
-        # WavLM gives [B, T_frames, 768]
-        # feats = self.wavlm(audio).last_hidden_state   # [B, T, 768]
-        feats = self.encoder(audio).transpose(1, 2)   # [B, T, 1536]
-
-        # Project to smaller dimension
         proj = self.projector(feats)   # [B, T, 512]
 
-        # Split for dual embedding
         proj1, proj2 = torch.chunk(proj, 2, dim=-1)  # each [B, T, 256]
-
-
-        # ASP expects [B, D, T]
         proj1 = proj1.transpose(1, 2)    # [B, 256, T]
-        proj2 = proj2.transpose(1, 2)    # [B, 256, T]
+        proj2 = proj2.transpose(1, 2)    # [B,
 
-        # Get speaker embedding
         emb1 = self.encoder1(proj1)       # [B, 256]
         emb2 = self.encoder2(proj2)       # [B, 256]
         emb = torch.stack([emb1, emb2], dim=1) #[B,2,256]
+        return emb
+    
+    def forward(self, audio):
+        '''
+        audio: [B, T]
+        '''
+        if audio.ndim== 3:  # [B, 1, T]
+            audio = audio.squeeze(1)
+        feats = self.encoder.extract_logmel(audio, aug=False)
+        emb = self.forward_from_features(feats)
+        return emb
 
-        if not return_vad:
+    # def forward(self, audio, return_vad=False):
+    #     """
+    #     mix_audio: [B, T]
+    #     """
+    #     if audio.dim() == 3:  # [B, 1, T]
+    #         audio = audio.squeeze(1)
+
+    #     # WavLM gives [B, T_frames, 768]
+    #     # feats = self.wavlm(audio).last_hidden_state   # [B, T, 768]
+    #     feats = self.encoder(audio).transpose(1, 2)   # [B, T, 1536]
+
+    #     # Project to smaller dimension
+    #     proj = self.projector(feats)   # [B, T, 512]
+
+    #     # Split for dual embedding
+    #     proj1, proj2 = torch.chunk(proj, 2, dim=-1)  # each [B, T, 256]
+
+
+    #     # ASP expects [B, D, T]
+    #     proj1 = proj1.transpose(1, 2)    # [B, 256, T]
+    #     proj2 = proj2.transpose(1, 2)    # [B, 256, T]
+
+    #     # Get speaker embedding
+    #     emb1 = self.encoder1(proj1)       # [B, 256]
+    #     emb2 = self.encoder2(proj2)       # [B, 256]
+    #     emb = torch.stack([emb1, emb2], dim=1) #[B,2,256]
+
+    #     # if not return_vad:
         
-            return emb
+    #     #     return emb
 
-        else:
-            vad1 = self.vad_head1(proj1)
-            vad2 = self.vad_head2(proj2)
-            vad_logits = torch.stack([vad1, vad2], dim=1)   # [B, 2, T]
-            return emb, vad_logits
+    #     # else:
+    #     #     vad1 = self.vad_head1(proj1)
+    #     #     vad2 = self.vad_head2(proj2)
+    #     #     vad_logits = torch.stack([vad1, vad2], dim=1)   # [B, 2, T]
+    #     #     return emb, vad_logits
+    #     return emb
 
 
 if __name__ == "__main__":
-    breakpoint()
+
     model = SpeakerEncoderDualWrapper(emb_dim=256)
     dummy_audio = torch.randn(2, 16000 * 3)  #
     emb = model(dummy_audio)
