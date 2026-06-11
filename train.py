@@ -38,6 +38,8 @@ class MySpEmb(pl.LightningModule):
         lr: float = 1e-4,
         finetune_encoder: bool = False,
         emb_dim: int = 256,
+        slot_repulsion_weight: float = 0.1,
+        slot_repulsion_margin: float = 0.0,
         speaker_map_path: str = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/Libriuni_03_08/Libri2Mix_ovl30to80/wav16k/min/metadata/train360_mapping.json",
     ):
         super().__init__()
@@ -58,8 +60,11 @@ class MySpEmb(pl.LightningModule):
         with open(speaker_map_path, "r") as f:
             speaker_map = json.load(f)
 
-
-        self.cosine_loss = LossWraper()
+        self.cosine_loss = LossWraper(
+            slot_repulsion_weight=slot_repulsion_weight,
+            slot_repulsion_margin=slot_repulsion_margin,
+            emb_dim=emb_dim,
+        )
         #Get the teacher model
         self.single_sp_model = SingleSpeakerEncoderWrapper(emb_dim=emb_dim)
         teacher_ckpt_path = "/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_tr360/best-epoch=62-val_separation=0.000.ckpt"
@@ -105,13 +110,15 @@ class MySpEmb(pl.LightningModule):
         """
         mix, source, labels = batch
         emb = self.forward(mix)                    # [B, 2, emb_dim]
+        silence_mask = source.abs().sum(dim=-1) <= 1e-8
         #change here
         with torch.no_grad():
             emb1 = self.single_sp_model(source[:, 0, :])  # [B, emb_dim]
             emb2 = self.single_sp_model(source[:, 1, :])  # [B, emb_dim]
             gt_embs = torch.stack([emb1, emb2], dim=1)  # [B, 2, emb_dim]
         
-        loss = self.cosine_loss(emb, gt_embs)
+        loss_out = self.cosine_loss(emb, gt_embs, silence_mask=silence_mask, return_components=True)
+        loss = loss_out["loss"]
         if batch_idx == 0 and self.current_epoch == 0:
             with torch.no_grad():
                 cos_gt = F.cosine_similarity(gt_embs[:,0,:], gt_embs[:,1,:], dim=-1).mean()
@@ -125,6 +132,38 @@ class MySpEmb(pl.LightningModule):
             on_step=True,
             on_epoch=True,
             prog_bar=True,
+            logger=True,
+            batch_size=mix.shape[0],
+        )
+        self.log(
+            "train/match_loss",
+            loss_out["match_loss"],
+            on_step=True,
+            on_epoch=True,
+            logger=True,
+            batch_size=mix.shape[0],
+        )
+        self.log(
+            "train/slot_repulsion_loss",
+            loss_out["slot_repulsion_loss"],
+            on_step=True,
+            on_epoch=True,
+            logger=True,
+            batch_size=mix.shape[0],
+        )
+        self.log(
+            "train/slot_cosine_mean",
+            loss_out["slot_cosine_mean"],
+            on_step=True,
+            on_epoch=True,
+            logger=True,
+            batch_size=mix.shape[0],
+        )
+        self.log(
+            "train/silence_proto_norm",
+            loss_out["silence_proto_norm"],
+            on_step=True,
+            on_epoch=True,
             logger=True,
             batch_size=mix.shape[0],
         )

@@ -8,11 +8,20 @@ import math
 
 
 class LossWraper(nn.Module):
-    def __init__(self):
+    def __init__(
+        self,
+        # slot_repulsion_weight: float = 0.1,
+        # slot_repulsion_margin: float = 0.0,
+        emb_dim: int = 256,
+    ):
         super().__init__()
 
         # self.loss_fn = ArcFaceLoss(n_classes = num_class, emb_dim = emb_dim, s = s, m=m)
-        self.loss_fn = CosineSimilarityLoss()
+        self.loss_fn = CosineSimilarityLoss(
+            # slot_repulsion_weight=slot_repulsion_weight,
+            # slot_repulsion_margin=slot_repulsion_margin,
+            emb_dim=emb_dim,
+        )
         
 
 
@@ -21,13 +30,20 @@ class LossWraper(nn.Module):
         pred: [B, 2, D]
         gt:   [B, 2, D]
         """
-        loss = self.loss_fn(pred, gt)
-        return loss
+        return self.loss_fn(pred, gt)
 
 
 class CosineSimilarityLoss(nn.Module):
-    def __init__(self):
+    def __init__(
+        self,
+        # slot_repulsion_weight: float = 0.1,
+        # slot_repulsion_margin: float = 0.0,
+        emb_dim: int = 256,
+    ):
         super().__init__()
+        # self.slot_repulsion_weight = slot_repulsion_weight
+        # self.slot_repulsion_margin = slot_repulsion_margin
+        # self.silence_proto = nn.Parameter(torch.randn(emb_dim))
 
     def forward(self, pred, gt):
         """
@@ -37,6 +53,12 @@ class CosineSimilarityLoss(nn.Module):
         # Normalize
         pred = F.normalize(pred, p=2, dim=-1)   # [B,2,D]
         gt   = F.normalize(gt,   p=2, dim=-1)   # [B,2,D]
+
+        # if silence_mask is not None:
+        #     silence_mask = silence_mask.to(device=pred.device, dtype=torch.bool)
+        #     silence_proto = F.normalize(self.silence_proto, p=2, dim=0)
+        #     gt = gt.clone()
+        #     gt[silence_mask] = silence_proto
 
         # Cosine similarity matrix: [B,2,2]
         cos = torch.matmul(pred, gt.transpose(1, 2))
@@ -58,7 +80,32 @@ class CosineSimilarityLoss(nn.Module):
 
             loss_total += loss_b
 
-        return loss_total / batch_size
+        match_loss = loss_total / batch_size
+
+        # Only repel slots when both sources are active speech.
+        # slot_cos = (pred[:, 0, :] * pred[:, 1, :]).sum(dim=-1)
+        # if silence_mask is not None:
+        #     both_active = (~silence_mask).all(dim=1)
+        #     if both_active.any():
+        #         repulsion_loss = F.relu(slot_cos[both_active] - self.slot_repulsion_margin).mean()
+        #     else:
+        #         repulsion_loss = pred.new_tensor(0.0)
+        # else:
+        #     repulsion_loss = F.relu(slot_cos - self.slot_repulsion_margin).mean()
+
+        # total_loss = match_loss + self.slot_repulsion_weight * repulsion_loss
+        total_loss = match_loss
+
+        # if return_components:
+        #     return {
+        #         "loss": total_loss,
+        #         "match_loss": match_loss,
+        #         "slot_repulsion_loss": repulsion_loss,
+        #         "slot_cosine_mean": slot_cos.mean(),
+        #         "silence_proto_norm": self.silence_proto.norm(),
+        #     }
+
+        return total_loss
 
 
 
