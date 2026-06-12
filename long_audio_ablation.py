@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 import torch
 import torchaudio
+import soundfile as sf
 import torch.nn.functional as F
 from tqdm import tqdm
 
@@ -25,6 +26,26 @@ from wavlm_single_embedding.model import SpeakerEncoderWrapper as SingleSpkEncod
 
 
 EPS = 1e-8
+
+
+# ============================================================
+# Audio loading helper
+# ============================================================
+def load_audio_mono(path, target_sr=None):
+    try:
+        wav, sr = torchaudio.load(path)
+        wav = wav.mean(0)
+    except Exception:
+        wav_np, sr = sf.read(path, dtype="float32")
+        if wav_np.ndim == 2:
+            wav_np = wav_np.mean(axis=1)
+        wav = torch.from_numpy(wav_np)
+
+    if target_sr is not None and sr != target_sr:
+        wav = torchaudio.functional.resample(wav, sr, target_sr)
+        sr = target_sr
+
+    return wav, sr
 
 
 # ============================================================
@@ -114,11 +135,7 @@ def get_teacher_emb_from_ref_track(
     device="cuda",
     sr=16000,
 ):
-    wav, wav_sr = torchaudio.load(wav_path)
-    wav = wav.mean(0)
-
-    if wav_sr != sr:
-        wav = torchaudio.functional.resample(wav, wav_sr, sr)
+    wav, _ = load_audio_mono(wav_path, target_sr=sr)
 
     s = int(start_sec * sr)
     e = int(end_sec * sr)
@@ -501,12 +518,32 @@ def evaluate_one_meeting(
         str(r["speaker_id"]): r["speaker_ref_path"]
         for _, r in speakers_df.iterrows()
     }
+    spk_to_anchor = {}
+    if {"anchor_start_sec", "anchor_end_sec"}.issubset(speakers_df.columns):
+        for _, r in speakers_df.iterrows():
+            spk_to_anchor[str(r["speaker_id"])] = (
+                float(r["anchor_start_sec"]),
+                float(r["anchor_end_sec"]),
+            )
 
-    wav, wav_sr = torchaudio.load(mix_path)
-    wav = wav.mean(0)
+    spk_to_teacher_anchor_emb = {}
+    if len(spk_to_anchor) > 0:
+        for spk, ref_path in spk_to_ref.items():
+            if spk not in spk_to_anchor:
+                continue
+            anchor_start_sec, anchor_end_sec = spk_to_anchor[spk]
+            t_emb = get_teacher_emb_from_ref_track(
+                teacher_model,
+                ref_path,
+                anchor_start_sec,
+                anchor_end_sec,
+                device=device,
+                sr=sr,
+            )
+            if t_emb is not None:
+                spk_to_teacher_anchor_emb[spk] = t_emb.detach().cpu().numpy()
 
-    if wav_sr != sr:
-        wav = torchaudio.functional.resample(wav, wav_sr, sr)
+    wav, _ = load_audio_mono(mix_path, target_sr=sr)
 
     memory = SpeakerMemoryBank(
         threshold=threshold,
@@ -548,18 +585,23 @@ def evaluate_one_meeting(
             selection_score = None
 
             if use_teacher_for_single_speaker_selection:
-                ref_path = spk_to_ref[true_spk]
-                t_emb = get_teacher_emb_from_ref_track(
-                    teacher_model,
-                    ref_path,
-                    start_sec,
-                    end_sec,
-                    device=device,
-                    sr=sr,
-                )
+                t_np = None
+                if true_spk in spk_to_teacher_anchor_emb:
+                    t_np = spk_to_teacher_anchor_emb[true_spk]
+                else:
+                    ref_path = spk_to_ref[true_spk]
+                    t_emb = get_teacher_emb_from_ref_track(
+                        teacher_model,
+                        ref_path,
+                        start_sec,
+                        end_sec,
+                        device=device,
+                        sr=sr,
+                    )
+                    if t_emb is not None:
+                        t_np = t_emb.detach().cpu().numpy()
 
-                if t_emb is not None:
-                    t_np = t_emb.detach().cpu().numpy()
+                if t_np is not None:
                     sims = [cosine_np(pred_embs[i], t_np) for i in range(2)]
                     selected_idx = int(np.argmax(sims))
                     selection_score = float(np.max(sims))
@@ -619,32 +661,39 @@ def evaluate_one_meeting(
             spk1 = str(active_speakers[0])
             spk2 = str(active_speakers[1])
 
-            t1 = get_teacher_emb_from_ref_track(
-                teacher_model,
-                spk_to_ref[spk1],
-                start_sec,
-                end_sec,
-                device=device,
-                sr=sr,
-            )
-            t2 = get_teacher_emb_from_ref_track(
-                teacher_model,
-                spk_to_ref[spk2],
-                start_sec,
-                end_sec,
-                device=device,
-                sr=sr,
-            )
+            t1_np = spk_to_teacher_anchor_emb.get(spk1)
+            t2_np = spk_to_teacher_anchor_emb.get(spk2)
 
-            if t1 is None or t2 is None:
+            if t1_np is None:
+                t1 = get_teacher_emb_from_ref_track(
+                    teacher_model,
+                    spk_to_ref[spk1],
+                    start_sec,
+                    end_sec,
+                    device=device,
+                    sr=sr,
+                )
+                if t1 is not None:
+                    t1_np = t1.detach().cpu().numpy()
+
+            if t2_np is None:
+                t2 = get_teacher_emb_from_ref_track(
+                    teacher_model,
+                    spk_to_ref[spk2],
+                    start_sec,
+                    end_sec,
+                    device=device,
+                    sr=sr,
+                )
+                if t2 is not None:
+                    t2_np = t2.detach().cpu().numpy()
+
+            if t1_np is None or t2_np is None:
                 mapped = [
                     (pred_embs[0], spk1, 0, None),
                     (pred_embs[1], spk2, 1, None),
                 ]
             else:
-                t1_np = t1.detach().cpu().numpy()
-                t2_np = t2.detach().cpu().numpy()
-
                 e0 = pred_embs[0]
                 e1 = pred_embs[1]
 
