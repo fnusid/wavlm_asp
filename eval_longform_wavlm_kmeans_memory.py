@@ -13,6 +13,7 @@ from transformers import WavLMConfig, WavLMModel
 
 
 EPS = 1e-8
+MIN_WAV_SAMPLES = 512
 
 
 def l2_normalize_np(x):
@@ -46,10 +47,19 @@ def load_wavlm(device):
 
 
 def get_wavlm_features(wavlm, wav, device):
+    if wav.shape[0] < MIN_WAV_SAMPLES:
+        wav = np.pad(wav, (0, MIN_WAV_SAMPLES - wav.shape[0]))
     wav_t = torch.from_numpy(wav).to(device).unsqueeze(0)
     with torch.no_grad():
         feats = wavlm(wav_t).last_hidden_state[0]
     return feats.cpu().numpy()
+
+
+def get_chunk_embedding(wavlm, wav, device):
+    feats = get_wavlm_features(wavlm, wav, device)
+    if feats.shape[0] == 0:
+        return None
+    return l2_normalize_np(feats.mean(axis=0))
 
 
 def cluster_accuracy(pred_labels, true_labels):
@@ -236,10 +246,17 @@ def build_chunk_embeddings(meeting_row, wavlm, args):
     mix_wav = load_audio(meeting_row["mix_path"], target_sr=args.sample_rate)
     timeline_df = pd.read_csv(meeting_row["timeline_csv"])
     speakers_df = pd.read_csv(meeting_row["speakers_csv"])
-    speaker_tracks = {
-        str(row["speaker_id"]): load_audio(row["speaker_ref_path"], target_sr=args.sample_rate)
-        for _, row in speakers_df.iterrows()
-    }
+    speaker_anchors = {}
+    for _, row in speakers_df.iterrows():
+        spk = str(row["speaker_id"])
+        start = int(round(float(row["anchor_start_sec"]) * args.sample_rate))
+        end = int(round(float(row["anchor_end_sec"]) * args.sample_rate))
+        anchor_chunk = mix_wav[start:end]
+        if anchor_chunk.size == 0:
+            continue
+        anchor_emb = get_chunk_embedding(wavlm, anchor_chunk, args.device)
+        if anchor_emb is not None:
+            speaker_anchors[spk] = anchor_emb
 
     rows = []
     for _, row in timeline_df.iterrows():
@@ -258,40 +275,39 @@ def build_chunk_embeddings(meeting_row, wavlm, args):
             continue
         n_clusters = min(args.chunk_k, feats.shape[0])
         cluster_ids = KMeans(n_clusters=n_clusters, n_init=10, random_state=0).fit_predict(feats)
-
-        src_chunks = {}
-        for spk in active_speakers:
-            src_chunks[spk] = speaker_tracks[spk][start:end]
-        min_len = min(len(x) for x in src_chunks.values())
-        if min_len == 0:
-            continue
-        for spk in list(src_chunks.keys()):
-            src_chunks[spk] = src_chunks[spk][:min_len]
-
-        hop_samples = min_len / float(feats.shape[0])
-        frame_dom = []
-        for i in range(feats.shape[0]):
-            s = int(i * hop_samples)
-            e = int((i + 1) * hop_samples)
-            e = min(e, min_len)
-            if e <= s:
-                frame_dom.append(None)
-                continue
-            energies = {}
-            for spk, sig in src_chunks.items():
-                seg = sig[s:e]
-                energies[spk] = float(np.mean(seg**2) + 1e-10)
-            frame_dom.append(max(energies.items(), key=lambda kv: kv[1])[0])
-
+        cluster_embs = []
         for c in range(n_clusters):
             mask = cluster_ids == c
             if not np.any(mask):
+                cluster_embs.append(None)
                 continue
             cluster_emb = l2_normalize_np(feats[mask].mean(axis=0))
-            dom_labels = [frame_dom[i] for i in np.where(mask)[0] if frame_dom[i] is not None]
-            if len(dom_labels) == 0:
+            cluster_embs.append(cluster_emb)
+
+        if len(active_speakers) == 1:
+            label_map = {0: active_speakers[0]}
+        elif len(active_speakers) == 2 and len(cluster_embs) >= 2:
+            a0 = speaker_anchors.get(active_speakers[0])
+            a1 = speaker_anchors.get(active_speakers[1])
+            if a0 is not None and a1 is not None and cluster_embs[0] is not None and cluster_embs[1] is not None:
+                direct = cosine_np(cluster_embs[0], a0) + cosine_np(cluster_embs[1], a1)
+                swap = cosine_np(cluster_embs[0], a1) + cosine_np(cluster_embs[1], a0)
+                if direct >= swap:
+                    label_map = {0: active_speakers[0], 1: active_speakers[1]}
+                else:
+                    label_map = {0: active_speakers[1], 1: active_speakers[0]}
+            else:
+                label_map = {0: active_speakers[0], 1: active_speakers[1]}
+        else:
+            label_map = {i: active_speakers[min(i, len(active_speakers) - 1)] for i in range(n_clusters)}
+
+        for c in range(n_clusters):
+            cluster_emb = cluster_embs[c]
+            if cluster_emb is None:
                 continue
-            true_speaker = Counter(dom_labels).most_common(1)[0][0]
+            true_speaker = label_map.get(c)
+            if true_speaker is None:
+                continue
             rows.append(
                 {
                     "meeting_id": meeting_row["meeting_id"],
