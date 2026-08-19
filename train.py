@@ -23,7 +23,7 @@ class MySpEmb(pl.LightningModule):
         finetune_encoder: bool = False,
         emb_dim: int = 256,
         # speaker_map_path: str = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/LibriSpeech/train-100_mapping.json",
-        speaker_map_path: str = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/LibriSpeech/train-360_mapping.json"
+        speaker_map_path: str = "/home/sidcs/datasets/LibriMix/LibriMix/LibriSpeech/train-360_mapping.json"
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -102,6 +102,7 @@ class MySpEmb(pl.LightningModule):
         on the entire validation set.
         """
         wav, labels = batch
+        breakpoint()
         emb = self.forward(wav)
 
         self.val_embs.append(emb.detach().cpu())
@@ -175,16 +176,17 @@ class MySpEmb(pl.LightningModule):
 # MAIN
 # ---------------------------------------
 if __name__ == "__main__":
-    DATA_ROOT = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/LibriSpeech"
+    DATA_ROOT = "/home/sidcs/datasets/LibriMix/LibriMix/LibriSpeech"
 
-    TRAIN_SPK_MAP = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/LibriSpeech/train-360_mapping.json"
+    TRAIN_SPK_MAP = "/home/sidcs/datasets/LibriMix/LibriMix/LibriSpeech/train-360_mapping.json"
 
     dm = LibriDataModule(
         data_root=DATA_ROOT,
         train_speaker_map_path=TRAIN_SPK_MAP,
         train_batch_size=32,
         val_batch_size=8,
-        num_workers=20,
+        # num_workers=20,
+        num_workers=0,
         sample_rate=16000,
     )
 
@@ -200,7 +202,7 @@ if __name__ == "__main__":
         name="ecapa_tdnn_arcface_tr360",
         # name='test_run',
         log_model=False,
-        save_dir="/mnt/disks/data/model_ckpts/ecapa_tdnn_arcface_tr360/wandb_logs",
+        save_dir="/home/sidcs/model_ckpts/ecapa_tdnn_arcface_tr360/wandb_logs",
     )
 
     ckpt = pl.callbacks.ModelCheckpoint(
@@ -208,15 +210,16 @@ if __name__ == "__main__":
         mode="min",
         save_top_k=10,
         filename="best-{epoch}-{val_separation:.3f}",
-        dirpath="/mnt/disks/data/model_ckpts/ecapa_tdnn_arcface_tr360/"
+        dirpath="/home/sidcs/model_ckpts/ecapa_tdnn_arcface_tr360/"
     )
 
     trainer = pl.Trainer(
-        strategy="ddp_find_unused_parameters_true",
+        # strategy="ddp_find_unused_parameters_true",
         
         accelerator="gpu",
 
-        devices=[0, 1, 2, 3],
+        # devices=[0, 1, 2, 3],
+        devices=[0],
         max_epochs=500,
         logger=wandb_logger,
         callbacks=[ckpt],
@@ -244,6 +247,6 @@ if __name__ == "__main__":
     #     limit_val_batches=1,
     #     num_sanity_val_steps=0,
     # )
-    trainer.fit(model, datamodule=dm)
+    trainer.fit(model, datamodule=dm, ckpt_path='/home/sidcs/model_ckpts/ecapa_tdnn_arcface_tr360/best-epoch=30-val_separation=0.000.ckpt')
     # trainer.validate(model, datamodule=dm)
     wandb.finish()
