@@ -6,6 +6,7 @@ import torchaudio
 import torch.nn.functional as F
 import numpy as np
 from tqdm import tqdm
+import torch.nn as nn
 
 from sklearn.cluster import KMeans
 from sklearn.metrics import (
@@ -19,7 +20,7 @@ import matplotlib.pyplot as plt
 from model import SpeakerEncoderDualWrapper   # your dual model class
 
 # Needed for teacher model
-sys.path.append("/home/sidharth./codebase/")
+sys.path.append("/home/sidcs.csegpu1/codebase/")
 from wavlm_single_embedding.model import SpeakerEncoderWrapper as SingleSpkEncoder
 
 
@@ -27,7 +28,7 @@ from wavlm_single_embedding.model import SpeakerEncoderWrapper as SingleSpkEncod
 # Global noise config
 # -----------------------------
 add_noise = True  # set True to enable noise corruption
-noise_dir = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/wham_noise/tt"
+noise_dir = "/home/sidcs.csegpu1/datasets/LibriMix/LibriMix/wham_noise/tt"
 noise_files = [
     os.path.join(noise_dir, f)
     for f in os.listdir(noise_dir)
@@ -136,6 +137,7 @@ def get_teacher_emb(teacher_model, wav_path, device="cuda"):
 
 def extract_dual_embeddings_with_teacher(
     dual_model,
+    linear_module, 
     teacher_model,
     metadata,
     device="cuda",
@@ -190,6 +192,7 @@ def extract_dual_embeddings_with_teacher(
         # ------------ Dual embeddings ------------
         with torch.no_grad():
             ed = dual_model(mix)
+            ed = linear_layer(ed)
         e0, e1 = ed.squeeze(0)   # [2,256]
 
         # ------------ Teacher embeddings ------------
@@ -326,12 +329,13 @@ def plot_tsne_subset(embs, labels, num_speakers=4, save_path="tsne_subset.png"):
 # 6) MAIN
 # =====================================================================
 if __name__ == "__main__":
-    META = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/Libriuni_05_08/Libri2Mix_ovl50to80/wav16k/min/metadata/mixture_test_mix_clean.csv"
+    META = "/home/sidcs.csegpu1/datasets/LibriMix/LibriMix/Libriuni_05_08/Libri2Mix_ovl50to80/wav16k/min/metadata/mixture_test_mix_clean.csv"
     # CKPT = "/mnt/disks/data/model_ckpts/librispeech_asp_ft_wavlm_linear_dualemb_tr360/best-epoch=49-val_separation=0.000.ckpt"
     # CKPT = "/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_dualemb/best-epoch=50-val_separation=0.000.ckpt" # WITHOUT FINE-TUNING WAVLM LAST 6 LAYERS
-    CKPT = "/mnt/disks/data/model_ckpts/ft_wavlm_linear_dualemb_noteacher_tr360/best-epoch=12-val_separation=0.000.ckpt"
-    TEACHER_CKPT = "/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_tr360/best-epoch=62-val_separation=0.000.ckpt"
-    TSNE_SAVE_PATH = "/home/sidharth./codebase/wavlm_dual_embedding/analysis/tsne_new/dual_devclean_whamtt_subset_tsne_linearasp.png"
+    CKPT = "/home/sidcs.csegpu1/model_ckpts/ft_wavlm_linear_dualemb_noteacher_tr360/best-epoch=12-val_separation=0.000.ckpt"
+    TEACHER_CKPT = "/home/sidcs.csegpu1/model_ckpts/librispeech_asp_wavlm_tr360/best-epoch=62-val_separation=0.000.ckpt"
+    linear_ckpt_path = "/home/sidcs.csegpu1/model_ckpts/ft_wavlm_linear_dualemb_noteacher_tr360_linearmappingtotr/best-epoch=47-val_separation=0.000.ckpt"
+    TSNE_SAVE_PATH = "/home/sidcs.csegpu1/codebase/wavlm_dual_embedding/analysis/mapping_to_tr_linear/dual_devclean_whamtt_subset_tsne_linearasp.png"
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print("Using device:", device)
@@ -366,9 +370,16 @@ if __name__ == "__main__":
     # ---- Load Dual Model ----
     dual = load_dual_model(CKPT, device=device)
 
+    linear_layer = nn.Linear(256, 256).to("cuda")
+    linear_ckpt = torch.load(linear_ckpt_path, map_location="cuda")
+    linear_state = linear_ckpt["state_dict"]
+    linear_sd = {k[len("linear_map."):]: v for k, v in linear_state.items() if k.startswith("linear_map.")}
+    linear_layer.load_state_dict(linear_sd)
+
     # ---- Extract Embeddings ----
     embs, labels = extract_dual_embeddings_with_teacher(
         dual_model=dual,
+        linear_module = linear_layer,
         teacher_model=teacher,
         metadata=metadata,
         device=device,
@@ -390,4 +401,4 @@ if __name__ == "__main__":
     print(f"silhouette    = {res['silhouette']:.4f}")
 
     # ---- TSNE on subset of speakers ----
-    # plot_tsne_subset(embs, labels, num_speakers=4, save_path=TSNE_SAVE_PATH)
+    plot_tsne_subset(embs, labels, num_speakers=20, save_path=TSNE_SAVE_PATH)

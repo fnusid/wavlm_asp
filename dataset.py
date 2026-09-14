@@ -47,9 +47,9 @@ class MyLibri2Mix(Dataset):
    
         self.noise_prob = 0.5
         if split=='train':
-            self.noise_file_path = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/noise_files_embedding_model/freesound_noise_bins.json" #[freesound, sound-bible, wham tr]
+            self.noise_file_path = "/home/sidcs.csegpu1/datasets/LibriMix/LibriMix/noise_files_embedding_model/freesound_noise_bins.json" #[freesound, sound-bible, wham tr]
         elif split == 'val':
-            self.noise_file_path = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/noise_files_embedding_model/wham_tt_noise_bins.json"
+            self.noise_file_path = "/home/sidcs.csegpu1/datasets/LibriMix/LibriMix/noise_files_embedding_model/wham_tt_noise_bins.json"
 
         with open(self.noise_file_path, 'r') as f:
             self.noise_dict = json.load(f)
@@ -255,8 +255,8 @@ class LibriMixDataModule(pl.LightningDataModule):
 if __name__ == '__main__':
 
     # breakpoint()
-    data_root = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix"
-    speaker_map_path = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/Libriuni_03_08/Libri2Mix_ovl30to80/wav16k/min/metadata/train360_mapping.json"
+    data_root = "/home/sidcs.csegpu1/datasets/Datasets/LibriMix/LibriMix"
+    speaker_map_path = "/home/sidcs.csegpu1/datasets/Datasets/LibriMix/LibriMix/Libriuni_03_08/Libri2Mix_ovl30to80/wav16k/min/metadata/train360_mapping.json"
 
     dataset = LibriMixDataModule(
         data_root, speaker_map_path, 
