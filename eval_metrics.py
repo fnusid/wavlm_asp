@@ -6,21 +6,22 @@ import torchaudio
 import torch.nn.functional as F
 import numpy as np
 from tqdm import tqdm
-
+from pathlib import Path
 from sklearn.cluster import KMeans
 from sklearn.metrics import (
     normalized_mutual_info_score,
     adjusted_rand_score,
     silhouette_score,
 )
+import pickle
 from sklearn.manifold import TSNE
 import matplotlib.pyplot as plt
 import sys
-sys.path.append('/home/sidharth./codebase/wavlm_dual_embedding')
+sys.path.append('/home/sidcs.csegpu1/codebase/wavlm_dual_embedding')
 from model import SpeakerEncoderDualWrapper   # your dual model class
 
 # Needed for teacher model
-sys.path.append("/home/sidharth./codebase/")
+sys.path.append("/home/sidcs.csegpu1/codebase")
 from wavlm_single_embedding.model import SpeakerEncoderWrapper as SingleSpkEncoder
 
 
@@ -28,7 +29,7 @@ from wavlm_single_embedding.model import SpeakerEncoderWrapper as SingleSpkEncod
 # Global noise config
 # -----------------------------
 add_noise = True  # set True to enable noise corruption
-noise_dir = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/wham_noise/tt"
+noise_dir = "/home/sidcs.csegpu1/datasets/LibriMix/LibriMix/wham_noise/tt"
 noise_files = [
     os.path.join(noise_dir, f)
     for f in os.listdir(noise_dir)
@@ -37,6 +38,8 @@ noise_files = [
 
 random.seed(44)
 
+
+CACHED_EMBS = {}
 
 # =====================================================================
 # 0) Utility: mix with SNR
@@ -168,9 +171,12 @@ def extract_dual_embeddings_with_teacher(
         return (a @ b) / (a.norm() * b.norm() + 1e-8)
 
     iterator = tqdm(metadata, desc="Extracting embeddings", disable=not verbose)
-
     for entry in iterator:
         mix_path = entry["mix_path"]
+        mix_path = Path(mix_path)
+        stem = mix_path.stem
+        CACHED_EMBS[stem] = {"embs": [], "labels": []}
+
         src1 = entry["src1"]
         src2 = entry["src2"]
         spk1 = entry["spk1"]
@@ -219,7 +225,9 @@ def extract_dual_embeddings_with_teacher(
         for e, lab in mapped:
             all_embs.append(e.cpu().numpy())
             all_labels.append(lab)
-
+            CACHED_EMBS[stem]["embs"].append(e.cpu().numpy())
+            CACHED_EMBS[stem]["labels"].append(lab)
+    
     return np.vstack(all_embs), np.array(all_labels)
 
 
@@ -409,74 +417,81 @@ def plot_tsne_subset(embs, labels, num_speakers=40, save_path="tsne_subset.png")
 # =====================================================================
 if __name__ == "__main__":
     # META = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/Libriuni_05_08/Libri2Mix_ovl50to80/wav16k/min/metadata/mixture_test_mix_clean.csv"
-    for ovlp in [0, 25, 50, 75, 100]:
-        META = f"/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/Libri2Mix_{ovlp}vlp/Libri2Mix_ovl{ovlp}to{ovlp}/wav16k/min/metadata/mixture_test_mix_clean.csv"
-        CKPT = "/mnt/disks/data/model_ckpts/librispeech_asp_ft_wavlm_linear_dualemb_tr360/best-epoch=49-val_separation=0.000.ckpt"
-        ckpt_joint_trained = "/mnt/disks/data/model_ckpts/pDCCRN_2sp_dpccn_joint_training_freezewavlm_indloss/best-epoch=19-val_separation=0.000.ckpt"
-        # CKPT = "/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_dualemb/best-epoch=50-val_separation=0.000.ckpt" # WITHOUT FINE-TUNING WAVLM LAST 6 LAYERS
-        TEACHER_CKPT = "/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_tr360/best-epoch=62-val_separation=0.000.ckpt"
-        TSNE_SAVE_PATH = f"/home/sidharth./codebase/wavlm_dual_embedding/analysis/tsne_final/two_sp_test_joint_train_20sp_overlap{ovlp}.png"
+    # for ovlp in [0, 25, 50, 75, 100]:
 
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        print("Using device:", device)
+    META = f"/home/sidcs.csegpu1/datasets/LibriMix/LibriMix/Libriuni_05_08/Libri2Mix_ovl50to80/wav16k/min/metadata/mixture_test_mix_clean.csv"
+    CKPT = "/home/sidcs.csegpu1/model_ckpts/librispeech_asp_ft_wavlm_linear_dualemb_tr360/best-epoch=49-val_separation=0.000.ckpt"
+    # ckpt_joint_trained = "/mnt/disks/data/model_ckpts/pDCCRN_2sp_dpccn_joint_training_freezewavlm_indloss/best-epoch=19-val_separation=0.000.ckpt"
+    CKPT = "/home/sidcs.csegpu1/model_ckpts/librispeech_asp_wavlm_dualemb/best-epoch=50-val_separation=0.000.ckpt" # WITHOUT FINE-TUNING WAVLM LAST 6 LAYERS
+    TEACHER_CKPT = "/home/sidcs.csegpu1/model_ckpts/librispeech_asp_wavlm_tr360/best-epoch=62-val_separation=0.000.ckpt"
+    # TSNE_SAVE_PATH = f"/home/sidharth./codebase/wavlm_dual_embedding/analysis/tsne_final/two_sp_test_joint_train_20sp_overlap{ovlp}.png"
 
-        # ---- Load Metadata ----
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print("Using device:", device)
 
-        metadata = parse_metadata(META)
-        print(f"Loaded {len(metadata)} mixtures.")
+    # ---- Load Metadata ----
 
-        # ---- Load Teacher Model ----
-        teacher = SingleSpkEncoder().to(device)
-        ckpt = torch.load(TEACHER_CKPT, map_location=device)
-        state = ckpt["state_dict"]
+    metadata = parse_metadata(META)
+    print(f"Loaded {len(metadata)} mixtures.")
 
-        filtered = {}
-        for k, v in state.items():
-            # keep ONLY parameters under model.*, but drop arcface
-            if not k.startswith("model."):
-                continue
-            if "arcface" in k or "arc_face" in k:
-                continue
+    # ---- Load Teacher Model ----
+    teacher = SingleSpkEncoder().to(device)
+    ckpt = torch.load(TEACHER_CKPT, map_location=device)
+    state = ckpt["state_dict"]
 
-            # strip "model." prefix
-            new_k = k.replace("model.", "", 1)
-            filtered[new_k] = v
+    filtered = {}
+    for k, v in state.items():
+        # keep ONLY parameters under model.*, but drop arcface
+        if not k.startswith("model."):
+            continue
+        if "arcface" in k or "arc_face" in k:
+            continue
 
-        print("Loaded teacher keys:", len(filtered))
-        teacher.load_state_dict(filtered, strict=True)
-        teacher.eval()
-        for p in teacher.parameters():
-            p.requires_grad = False
+        # strip "model." prefix
+        new_k = k.replace("model.", "", 1)
+        filtered[new_k] = v
 
-        # ---- Load Dual Model ----
-        dual = load_dual_model(CKPT, device=device)
-        joint_ckpt = torch.load(ckpt_joint_trained, map_location=device)
-        joint_state = joint_trained_model_weights(joint_ckpt['state_dict'])
-        dual.load_state_dict(joint_state, strict=True)
-        
+    print("Loaded teacher keys:", len(filtered))
+    teacher.load_state_dict(filtered, strict=True)
+    teacher.eval()
+    for p in teacher.parameters():
+        p.requires_grad = False
 
-        # ---- Extract Embeddings ----
-        embs, labels = extract_dual_embeddings_with_teacher(
-            dual_model=dual,
-            teacher_model=teacher,
-            metadata=metadata,
-            device=device,
-            verbose=True,
-        )
-        print(f"Extracted {len(embs)} embeddings for {len(np.unique(labels))} speakers.")
+    # ---- Load Dual Model ----
+    dual = load_dual_model(CKPT, device=device)
+    # joint_ckpt = torch.load(ckpt_joint_trained, map_location=device)
+    # joint_state = joint_trained_model_weights(joint_ckpt['state_dict'])
+    # dual.load_state_dict(joint_state, strict=True)
+    print("Loaded dual model.")
 
-        # ---- Compute Metrics ----
-        print(f"\nComputing clustering metrics for overlap {ovlp}...")
-        res = compute_clustering_metrics(embs, labels)
+    # ---- Extract Embeddings ----
+    embs, labels = extract_dual_embeddings_with_teacher(
+        dual_model=dual,
+        teacher_model=teacher,
+        metadata=metadata,
+        device=device,
+        verbose=True,
+    )
 
-        print("\n=== Clustering / Separation Metrics (Full Dev) ===")
-        print(f"same_mean_cos = {res['same_mean_cos']:.4f}")
-        print(f"diff_mean_cos = {res['diff_mean_cos']:.4f}")
-        print(f"separation    = {res['separation']:.4f}")
-        print(f"cluster_acc   = {res['cluster_acc']:.4f}")
-        print(f"nmi           = {res['nmi']:.4f}")
-        print(f"ari           = {res['ari']:.4f}")
-        print(f"silhouette    = {res['silhouette']:.4f}")
+    #save the cached embeddings as a pickle file
+    with open("cached_embeddings.pkl", "wb") as f:
+        pickle.dump(CACHED_EMBS, f)
+    print("Saved cached embeddings to cached_embeddings.pkl")
+    
+    # print(f"Extracted {len(embs)} embeddings for {len(np.unique(labels))} speakers.")
 
-        # ---- TSNE on subset of speakers ----
-        plot_tsne_subset(embs, labels, num_speakers=20, save_path=TSNE_SAVE_PATH)
+    # # ---- Compute Metrics ----
+    # print(f"\nComputing clustering metrics for overlap {ovlp}...")
+    # res = compute_clustering_metrics(embs, labels)
+
+    # print("\n=== Clustering / Separation Metrics (Full Dev) ===")
+    # print(f"same_mean_cos = {res['same_mean_cos']:.4f}")
+    # print(f"diff_mean_cos = {res['diff_mean_cos']:.4f}")
+    # print(f"separation    = {res['separation']:.4f}")
+    # print(f"cluster_acc   = {res['cluster_acc']:.4f}")
+    # print(f"nmi           = {res['nmi']:.4f}")
+    # print(f"ari           = {res['ari']:.4f}")
+    # print(f"silhouette    = {res['silhouette']:.4f}")
+
+    # # ---- TSNE on subset of speakers ----
+    # plot_tsne_subset(embs, labels, num_speakers=20, save_path=TSNE_SAVE_PATH)
