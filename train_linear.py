@@ -104,7 +104,48 @@ class MySpEmb(pl.LightningModule):
         # self.cosine_loss = LossWraper()
         self.loss_fn = CosineSimilarityLoss()
 
-        self.linear_map = nn.Linear(256, 256)
+        # self.linear_map = nn.Linear(256, 256)
+        self.mlp = nn.Sequential(nn.Linear(256, 512),
+                                nn.ReLU(),
+                                nn.Linear(512, 256))
+        
+        linear_ckpt_path = "/home/sidcs.csegpu1/model_ckpts/ft_wavlm_linear_dualemb_noteacher_tr360_linearmappingtotr/best-epoch=47-val_separation=0.000.ckpt"
+        linear_ckpt = torch.load(linear_ckpt_path, map_location="cpu", weights_only=True)
+        linear_state = linear_ckpt["state_dict"]
+
+        W = linear_state["linear_map.weight"].to(self.mlp[2].weight)
+        b = linear_state["linear_map.bias"].to(self.mlp[2].bias)
+        with torch.no_grad():
+            I  = torch.eye(256, device=self.mlp[0].weight.device, dtype=self.mlp[0].weight.dtype)
+
+            self.mlp[0].weight.copy_(torch.cat([I, -I], dim=0))
+            self.mlp[0].bias.zero_()
+
+            self.mlp[2].weight.copy_(torch.cat([W, -W], dim=1))
+            self.mlp[2].bias.copy_(b)
+            # Verify equivalence before training.
+            x = torch.randn(8, 2, 256, device=W.device, dtype=W.dtype)
+
+            expected = F.linear(x, W, b)
+            actual = self.mlp(x)
+
+            torch.testing.assert_close(
+                actual, expected,
+                rtol=1e-5,
+                atol=1e-5,
+            )
+            print("MLP matches trained linear mapper.")
+            print("Maximum error:", (actual - expected).abs().max().item())
+
+
+    def train(self, mode=True):
+        super().train(mode)
+
+        # Frozen encoders always remain in evaluation mode.
+        self.model.eval()
+        self.single_sp_model.eval()
+
+        return self
 
         # -----------------------------
         # 3. Embedding metrics (for validation)
@@ -134,7 +175,8 @@ class MySpEmb(pl.LightningModule):
             emb2 = self.single_sp_model(source[:, 1, :])  # [B, emb_dim]
             gt_embs = torch.stack([emb1, emb2], dim=1)  # [B, 2, emb_dim]
 
-        mapped_emb = self.linear_map(emb)
+        # mapped_emb = self.linear_map(emb)
+        mapped_emb = self.mlp(emb)
         # loss = self.loss_fn(emb, labels)
         loss = self.loss_fn(mapped_emb, gt_embs)
 
@@ -146,6 +188,7 @@ class MySpEmb(pl.LightningModule):
             prog_bar=True,
             logger=True,
             batch_size=mix.shape[0],
+            sync_dist=True
         )
         return loss
 
@@ -172,7 +215,8 @@ class MySpEmb(pl.LightningModule):
             emb2 = self.single_sp_model(source[:, 1, :])  # [B, emb_dim]
             gt_embs = torch.stack([emb1, emb2], dim=1)     # [B, 2, emb_dim]
 
-        mapped_emb = self.linear_map(emb)
+        # mapped_emb = self.linear_map(emb)
+        mapped_emb = self.mlp(emb)
 
         loss = self.loss_fn(mapped_emb, gt_embs)
         #labels : [B, 2]
@@ -185,6 +229,7 @@ class MySpEmb(pl.LightningModule):
             prog_bar=True,
             logger=True,
             batch_size=mix.shape[0],
+            sync_dist=True
         )
 
         self.val_embs.append(mapped_emb.detach().cpu())
@@ -264,13 +309,17 @@ class MySpEmb(pl.LightningModule):
 if __name__ == "__main__":
     DATA_ROOT = "/home/sidcs.csegpu1/datasets/LibriMix/LibriMix" 
     SPEAKER_MAP = "/home/sidcs.csegpu1/datasets/LibriMix/LibriMix/Libriuni_05_08/Libri2Mix_ovl50to80/wav16k/min/metadata/train360_mapping.json"
+    import os
+    dir_path = "/home/sidcs.csegpu1/model_ckpts/ft_wavlm_linear_dualemb_noteacher_tr360_mlpmappingtotr/linear_init"
+    if not os.path.exists(dir_path):
+        os.makedirs(dir_path)
 
 
     dm = LibriMixDataModule(
         data_root=DATA_ROOT,
         speaker_map_path=SPEAKER_MAP,
-        batch_size=32, 
-        num_workers=20, # Set this to your preference
+        batch_size=64, 
+        num_workers=40, # Set this to your preference
         num_speakers=2
     )
 
@@ -280,27 +329,28 @@ if __name__ == "__main__":
         emb_dim=256,
         speaker_map_path=SPEAKER_MAP,   # ONLY train map here
     )
+    # breakpoint()
 
     wandb_logger = WandbLogger(
         project="librispeech-speaker-encoder",
-        name="ft_wavlm_linear_dualemb_noteacher_tr360_linearmappingtotr",
+        name="ft_wavlm_linear_dualemb_noteacher_tr360_mlpmappingtotr",
         # name='test_run',
         log_model=False,
-        save_dir="/home/sidcs.csegpu1/model_ckpts/ft_wavlm_linear_dualemb_noteacher_tr360_linearmappingtotr/wandb_logs",
+        save_dir=f"{dir_path}/wandb_logs",
     )
 
     ckpt = pl.callbacks.ModelCheckpoint(
-        monitor="train/loss",
+        monitor="val/loss",
         mode="min",
         save_top_k=1,
         filename="best-{epoch}-{val_separation:.3f}",
-        dirpath="/home/sidcs.csegpu1/model_ckpts/ft_wavlm_linear_dualemb_noteacher_tr360_linearmappingtotr/"
+        dirpath=dir_path
     )
 
     trainer = pl.Trainer(
         strategy="ddp_find_unused_parameters_true",
         accelerator="gpu",
-        devices=[0, 1, 2, 3],
+        devices=[0, 1, 2, 3,4,5,6,7],
         max_epochs=50,
         logger=wandb_logger,
         callbacks=[ckpt],

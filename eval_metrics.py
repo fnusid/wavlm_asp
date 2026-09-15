@@ -137,7 +137,7 @@ def get_teacher_emb(teacher_model, wav_path, device="cuda"):
 
 def extract_dual_embeddings_with_teacher(
     dual_model,
-    linear_module, 
+    mlp_module, 
     teacher_model,
     metadata,
     device="cuda",
@@ -192,7 +192,7 @@ def extract_dual_embeddings_with_teacher(
         # ------------ Dual embeddings ------------
         with torch.no_grad():
             ed = dual_model(mix)
-            ed = linear_layer(ed)
+            ed = mlp_module(ed)
         e0, e1 = ed.squeeze(0)   # [2,256]
 
         # ------------ Teacher embeddings ------------
@@ -334,8 +334,8 @@ if __name__ == "__main__":
     # CKPT = "/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_dualemb/best-epoch=50-val_separation=0.000.ckpt" # WITHOUT FINE-TUNING WAVLM LAST 6 LAYERS
     CKPT = "/home/sidcs.csegpu1/model_ckpts/ft_wavlm_linear_dualemb_noteacher_tr360/best-epoch=12-val_separation=0.000.ckpt"
     TEACHER_CKPT = "/home/sidcs.csegpu1/model_ckpts/librispeech_asp_wavlm_tr360/best-epoch=62-val_separation=0.000.ckpt"
-    linear_ckpt_path = "/home/sidcs.csegpu1/model_ckpts/ft_wavlm_linear_dualemb_noteacher_tr360_linearmappingtotr/best-epoch=47-val_separation=0.000.ckpt"
-    TSNE_SAVE_PATH = "/home/sidcs.csegpu1/codebase/wavlm_dual_embedding/analysis/mapping_to_tr_linear/dual_devclean_whamtt_subset_tsne_linearasp.png"
+    mlp_ckpt_path = "/home/sidcs.csegpu1/model_ckpts/ft_wavlm_linear_dualemb_noteacher_tr360_mlpmappingtotr/best-epoch=47-val_separation=0.000_nofinalrelu.ckpt"
+    TSNE_SAVE_PATH = "/home/sidcs.csegpu1/codebase/wavlm_dual_embedding/analysis/mapping_to_tr_linear/dual_devclean_whamtt_subset_tsne_linearasp_mlp.png"
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print("Using device:", device)
@@ -370,16 +370,20 @@ if __name__ == "__main__":
     # ---- Load Dual Model ----
     dual = load_dual_model(CKPT, device=device)
 
-    linear_layer = nn.Linear(256, 256).to("cuda")
-    linear_ckpt = torch.load(linear_ckpt_path, map_location="cuda")
-    linear_state = linear_ckpt["state_dict"]
-    linear_sd = {k[len("linear_map."):]: v for k, v in linear_state.items() if k.startswith("linear_map.")}
-    linear_layer.load_state_dict(linear_sd)
+    mlp_layer = nn.Sequential(nn.Linear(256, 512),
+                                nn.ReLU(),
+                                nn.Linear(512, 256),
+                                nn.ReLU()).to("cuda")
+
+    mlp_ckpt = torch.load(mlp_ckpt_path, map_location="cuda")
+    mlp_state = mlp_ckpt["state_dict"]
+    mlp_sd = {k[len("mlp."):]: v for k, v in mlp_state.items() if k.startswith("mlp.")}
+    mlp_layer.load_state_dict(mlp_sd)
 
     # ---- Extract Embeddings ----
     embs, labels = extract_dual_embeddings_with_teacher(
         dual_model=dual,
-        linear_module = linear_layer,
+        mlp_module = mlp_layer,
         teacher_model=teacher,
         metadata=metadata,
         device=device,
