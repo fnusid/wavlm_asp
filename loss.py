@@ -1,3 +1,5 @@
+import itertools
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -10,27 +12,111 @@ import math
 class LossWraper(nn.Module):
     def __init__(
         self,
-        # slot_repulsion_weight: float = 0.1,
-        # slot_repulsion_margin: float = 0.0,
         emb_dim: int = 256,
     ):
         super().__init__()
 
-        # self.loss_fn = ArcFaceLoss(n_classes = num_class, emb_dim = emb_dim, s = s, m=m)
-        self.loss_fn = CosineSimilarityLoss(
-            # slot_repulsion_weight=slot_repulsion_weight,
-            # slot_repulsion_margin=slot_repulsion_margin,
-            emb_dim=emb_dim,
+        # self.loss_fn = TeacherStudentPITLoss()
+        self.loss_fn = TeacherStudentFrameCosineLoss()
+
+
+    def forward(self, d_hat_t, d):
+        """
+        d_hat_t: [B, K, emb_dim, T']  student frame-wise embeddings
+        d:       [B, K, emb_dim]      teacher target embeddings
+        """
+        return self.loss_fn(d_hat_t, d)
+
+
+class TeacherStudentPITLoss(nn.Module):
+    """
+    Utterance-level permutation-invariant teacher-student MSE loss (uPIT):
+
+        L_uPIT = (1/(K*T)) * min_{pi in P} sum_t sum_k || d_k - d_hat_{pi(k)}(t) ||^2
+
+    The teacher target d_k is a single utterance-level vector (constant
+    over time), while the student produces one frame-wise stream per slot.
+    Unlike the frame-wise variant (Eq. 3 in Cord-Landwehr et al.,
+    arXiv:2306.00634), a single permutation is chosen per utterance —
+    minimizing the *total* squared error accumulated over all frames —
+    rather than allowing the assignment to vary frame to frame, so each
+    student slot is tied to one speaker for the whole utterance.
+    """
+
+    def forward(self, d_hat_t, d):
+        """
+        d_hat_t: [B, K, emb_dim, T']  student frame-wise embeddings
+        d:       [B, K, emb_dim]      teacher target embeddings
+        """
+        B, K, E, T = d_hat_t.shape
+
+        # squared L2 distance between every teacher target k and every
+        # student slot j, summed over all frames -> [B, K(teacher), K(student)]
+        dist2 = (d.unsqueeze(2).unsqueeze(-1) - d_hat_t.unsqueeze(1)).pow(2).sum(dim=3).sum(dim=-1)
+
+        perms = torch.tensor(list(itertools.permutations(range(K))), device=d_hat_t.device)  # [P, K]
+        teacher_idx = torch.arange(K, device=d_hat_t.device)
+
+        # cost of each permutation, per utterance -> [P, B]
+        perm_costs = torch.stack(
+            [dist2[:, teacher_idx, perm].sum(dim=1) for perm in perms],
+            dim=0,
         )
-        
+
+        best_cost, best_perm = perm_costs.min(dim=0)  # [B]
+        loss = (best_cost / (K * T)).mean()
+
+        return {"loss": loss, "best_perm": best_perm}
 
 
-    def forward(self, pred, gt):
+class TeacherStudentFrameCosineLoss(nn.Module):
+    """
+    Frame-wise, utterance-level-PIT (uPIT) teacher-student cosine loss.
+
+    Same permutation search and aggregation as TeacherStudentPITLoss, but
+    each frame is scored by cosine distance (1 - cos) instead of squared
+    L2, and both sides are L2-normalized before comparison so the loss is
+    invariant to embedding norm (unlike the raw-MSE version, since neither
+    the teacher nor the student embeddings in this model are normalized
+    at the output):
+
+        L = (1/(K*T)) * min_{pi in P} sum_t sum_k (1 - cos(d_k, d_hat_{pi(k)}(t)))
+    """
+
+    def __init__(self, eps: float = 1e-8):
+        super().__init__()
+        self.eps = eps
+
+    def forward(self, d_hat_t, d):
         """
-        pred: [B, 2, D]
-        gt:   [B, 2, D]
+        d_hat_t: [B, K, emb_dim, T']  student frame-wise embeddings
+        d:       [B, K, emb_dim]      teacher target embeddings
         """
-        return self.loss_fn(pred, gt)
+        B, K, E, T = d_hat_t.shape
+
+        d_norm = F.normalize(d, p=2, dim=-1, eps=self.eps)            # [B, K, E]
+        d_hat_norm = F.normalize(d_hat_t, p=2, dim=2, eps=self.eps)   # [B, K, E, T]
+
+        # cosine similarity between every teacher target k and every
+        # student slot j at every frame -> [B, K(teacher), K(student), T]
+        cos = torch.einsum("bke,bjet->bkjt", d_norm, d_hat_norm)
+
+        # cost of assigning teacher k to student slot j, summed over frames
+        cost = (1.0 - cos).sum(dim=-1)  # [B, K(teacher), K(student)]
+
+        perms = torch.tensor(list(itertools.permutations(range(K))), device=d_hat_t.device)  # [P, K]
+        teacher_idx = torch.arange(K, device=d_hat_t.device)
+
+        # cost of each permutation, per utterance -> [P, B]
+        perm_costs = torch.stack(
+            [cost[:, teacher_idx, perm].sum(dim=1) for perm in perms],
+            dim=0,
+        )
+
+        best_cost, best_perm = perm_costs.min(dim=0)  # [B]
+        loss = (best_cost / (K * T)).mean()
+
+        return {"loss": loss, "best_perm": best_perm}
 
 
 class CosineSimilarityLoss(nn.Module):

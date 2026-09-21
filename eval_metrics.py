@@ -1,4 +1,12 @@
 import os
+
+# Must be set before numpy/sklearn are imported. This machine has 256 cores,
+# but the OpenBLAS build in use is compiled with MAX_THREADS=64 - letting it
+# spawn threads for every core overflows its thread-metadata array and
+# crashes with "corrupted size vs. prev_size" inside BLAS calls (e.g. KMeans).
+for _var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+    os.environ.setdefault(_var, "16")
+
 import sys
 import random
 import torch
@@ -17,13 +25,14 @@ import pickle
 from sklearn.manifold import TSNE
 import matplotlib.pyplot as plt
 import sys
-sys.path.append('/home/sidcs.csegpu1/codebase/wavlm_dual_embedding')
-from model import SpeakerEncoderDualWrapper   # your dual model class
+# sys.path.append('/home/sidcs.csegpu1/codebase/wavlm_dual_embedding')
+# from model import SpeakerEncoderDualWrapper   # your dual model class
 
-# Needed for teacher model
-sys.path.append("/home/sidcs.csegpu1/codebase")
-from wavlm_single_embedding.model import SpeakerEncoderWrapper as SingleSpkEncoder
-
+# # Needed for teacher model
+# sys.path.append("/home/sidcs.csegpu1/codebase")
+# from wavlm_single_embedding.model import SpeakerEncoderWrapper as SingleSpkEncoder
+sys.path.append('/home/sidcs.csegpu1/codebase')
+from teacher_student_speaker_embedding.model import TeacherStudentSpeakerEmbeddingModel
 
 # -----------------------------
 # Global noise config
@@ -148,8 +157,7 @@ def get_teacher_emb(teacher_model, wav_path, device="cuda"):
 
 
 def extract_dual_embeddings_with_teacher(
-    dual_model,
-    teacher_model,
+    model,
     metadata,
     device="cuda",
     verbose=True
@@ -204,14 +212,21 @@ def extract_dual_embeddings_with_teacher(
         mix = mix.to(device).unsqueeze(0)
 
         # ------------ Dual embeddings ------------
+        # with torch.no_grad():
+        #     ed = dual_model(mix)
+        # e0, e1 = ed.squeeze(0)   # [2,256]
+        src1_,_ = torchaudio.load(src1)
+        src2_,_ = torchaudio.load(src2)
+        sources = torch.stack([src1_, src2_], dim=1).to("cuda")
         with torch.no_grad():
-            ed = dual_model(mix)
-        e0, e1 = ed.squeeze(0)   # [2,256]
-
-        # ------------ Teacher embeddings ------------
-        t1 = get_teacher_emb(teacher_model, src1, device)
-        t2 = get_teacher_emb(teacher_model, src2, device)
-
+            ed_dict = model(mix, sources=sources)
+        t1, t2 = ed_dict["d"][:, 0, :], ed_dict["d"][:, 1, :]
+        e0, e1 = ed_dict["d_hat"][:, 0, :], ed_dict["d_hat"][:, 1, :]
+        t1, t2 = t1.squeeze(0), t2.squeeze(0)
+        e0, e1 = e0.squeeze(0), e1.squeeze(0)
+        # t1 = get_teacher_emb(teacher_model, src1, device)
+        # t2 = get_teacher_emb(teacher_model, src2, device)
+        
         # ------------ PIT matching ------------
         score_direct = cosine(e0, t1) + cosine(e1, t2)
         score_swap   = cosine(e0, t2) + cosine(e1, t1)
@@ -234,28 +249,41 @@ def extract_dual_embeddings_with_teacher(
 # =====================================================================
 # 4) Clustering + Separation Metrics
 # =====================================================================
-def compute_clustering_metrics(embs, labels):
+def compute_clustering_metrics(embs, labels, silhouette_sample_size=5000, kmeans_n_init=5, random_state=0):
     norms = np.linalg.norm(embs, axis=1, keepdims=True) + 1e-10
-    e = embs / norms
+    e = (embs / norms).astype(np.float32)
+    labels = np.asarray(labels)
     N = e.shape[0]
 
-    same, diff = [], []
-    for i in range(N):
-        for j in range(i+1, N):
-            cos = float(np.dot(e[i], e[j]))
-            if labels[i] == labels[j]:
-                same.append(cos)
-            else:
-                diff.append(cos)
+    # ---- same/diff mean cosine, computed in O(N*D) instead of O(N^2) ----
+    # For unit vectors, sum_{i!=j} dot(e_i,e_j) = ||sum_i e_i||^2 - N, so the
+    # sum over all pairs (and over each label's pairs) can be obtained from
+    # vector sums directly, without materializing any pairwise matrix.
+    total_sum = e.sum(axis=0)
+    total_pair_sum = (float(total_sum @ total_sum) - N) / 2.0
+    total_pair_count = N * (N - 1) / 2.0
 
-    same_mean = np.mean(same) if same else 0.0
-    diff_mean = np.mean(diff) if diff else 0.0
+    same_sum, same_count = 0.0, 0.0
+    for lab in np.unique(labels):
+        idx = labels == lab
+        n_k = int(idx.sum())
+        if n_k < 2:
+            continue
+        s_k = e[idx].sum(axis=0)
+        same_sum += (float(s_k @ s_k) - n_k) / 2.0
+        same_count += n_k * (n_k - 1) / 2.0
+
+    diff_sum = total_pair_sum - same_sum
+    diff_count = total_pair_count - same_count
+
+    same_mean = same_sum / same_count if same_count else 0.0
+    diff_mean = diff_sum / diff_count if diff_count else 0.0
     separation = same_mean - diff_mean
 
     speakers = np.unique(labels)
     K = len(speakers)
 
-    kmeans = KMeans(n_clusters=K, n_init=10, random_state=0)
+    kmeans = KMeans(n_clusters=K, n_init=kmeans_n_init, random_state=random_state)
     pred = kmeans.fit_predict(e)
 
     cluster_acc = _cluster_accuracy(pred, labels)
@@ -263,8 +291,12 @@ def compute_clustering_metrics(embs, labels):
     ari = adjusted_rand_score(labels, pred)
 
     try:
-        silhouette = silhouette_score(e, labels)
-    except Exception:
+        # Full silhouette needs an N x N distance matrix (~82GB at N=101600);
+        # subsample instead so it stays tractable.
+        n_sil = min(silhouette_sample_size, N)
+        silhouette = silhouette_score(e, labels, sample_size=n_sil, random_state=random_state)
+    except Exception as exc:
+        print(f"silhouette_score failed: {exc}")
         silhouette = float("nan")
 
     return {
@@ -419,11 +451,13 @@ if __name__ == "__main__":
     # META = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/Libriuni_05_08/Libri2Mix_ovl50to80/wav16k/min/metadata/mixture_test_mix_clean.csv"
     # for ovlp in [0, 25, 50, 75, 100]:
 
-    META = f"/home/sidcs.csegpu1/datasets/LibriMix/LibriMix/Libriuni_05_08/Libri2Mix_ovl50to80/wav16k/min/metadata/mixture_test_mix_clean.csv"
-    CKPT = "/home/sidcs.csegpu1/model_ckpts/librispeech_asp_ft_wavlm_linear_dualemb_tr360/best-epoch=49-val_separation=0.000.ckpt"
+    # META = f"/home/sidcs.csegpu1/datasets/LibriMix/LibriMix/Libriuni_05_08/Libri2Mix_ovl50to80/wav16k/min/metadata/mixture_test_mix_clean.csv"
+    META = "/home/sidcs.csegpu1/datasets/LibriMix/LibriMix/Libriuni_05_08/Libri2Mix_ovl50to80/wav16k/min/metadata/mixture_train-360_mix_clean.csv"
+    # CKPT = "/home/sidcs.csegpu1/model_ckpts/librispeech_asp_ft_wavlm_linear_dualemb_tr360/best-epoch=49-val_separation=0.000.ckpt"
+    # TEACHER_CKPT = "/home/sidcs.csegpu1/model_ckpts/cord_landwehr_arcface_tr460/best-epoch=59.ckpt"
     # ckpt_joint_trained = "/mnt/disks/data/model_ckpts/pDCCRN_2sp_dpccn_joint_training_freezewavlm_indloss/best-epoch=19-val_separation=0.000.ckpt"
-    CKPT = "/home/sidcs.csegpu1/model_ckpts/librispeech_asp_wavlm_dualemb/best-epoch=50-val_separation=0.000.ckpt" # WITHOUT FINE-TUNING WAVLM LAST 6 LAYERS
-    TEACHER_CKPT = "/home/sidcs.csegpu1/model_ckpts/librispeech_asp_wavlm_tr360/best-epoch=62-val_separation=0.000.ckpt"
+    CKPT = "/home/sidcs.csegpu1/model_ckpts/librispeech_cord_landwehr_dualemb_tr360_cos/best-epoch=59-val_separation=0.000-v1.ckpt" # WITHOUT FINE-TUNING WAVLM LAST 6 LAYERS
+    # TEACHER_CKPT = "/home/sidcs.csegpu1/model_ckpts/librispeech_asp_wavlm_tr360/best-epoch=62-val_separation=0.000.ckpt"
     # TSNE_SAVE_PATH = f"/home/sidharth./codebase/wavlm_dual_embedding/analysis/tsne_final/two_sp_test_joint_train_20sp_overlap{ovlp}.png"
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -431,16 +465,68 @@ if __name__ == "__main__":
 
     # ---- Load Metadata ----
 
+    CACHE_PATH = "cached_embeddings_cordlandwehr.pkl"
+    TSNE_SAVE_PATH = "tsne_subset.png"
+
+    if os.path.exists(CACHE_PATH):
+        print(f"Found cached embeddings at {CACHE_PATH}, loading instead of re-extracting.")
+        with open(CACHE_PATH, "rb") as f:
+            CACHED_EMBS.update(pickle.load(f))
+        embs = np.vstack([np.asarray(v["embs"]) for v in CACHED_EMBS.values()])
+        labels = np.array([lab for v in CACHED_EMBS.values() for lab in v["labels"]])
+        print(f"Loaded {len(embs)} cached embeddings for {len(np.unique(labels))} speakers.")
+
+        print(f"\nComputing clustering metrics..")
+        res = compute_clustering_metrics(embs, labels)
+
+        print("\n=== Clustering / Separation Metrics (Full Dev) ===")
+        print(f"same_mean_cos = {res['same_mean_cos']:.4f}")
+        print(f"diff_mean_cos = {res['diff_mean_cos']:.4f}")
+        print(f"separation    = {res['separation']:.4f}")
+        print(f"cluster_acc   = {res['cluster_acc']:.4f}")
+        print(f"nmi           = {res['nmi']:.4f}")
+        print(f"ari           = {res['ari']:.4f}")
+        print(f"silhouette    = {res['silhouette']:.4f}")
+
+        plot_tsne_subset(embs, labels, num_speakers=20, save_path=TSNE_SAVE_PATH)
+        sys.exit(0)
+
     metadata = parse_metadata(META)
     print(f"Loaded {len(metadata)} mixtures.")
 
-    # ---- Load Teacher Model ----
-    teacher = SingleSpkEncoder().to(device)
-    ckpt = torch.load(TEACHER_CKPT, map_location=device)
-    state = ckpt["state_dict"]
+    # # ---- Load Teacher Model ----
+    # teacher = SingleSpkEncoder().to(device)
+    # ckpt = torch.load(TEACHER_CKPT, map_location=device)
+    # state = ckpt["state_dict"]
 
+    # filtered = {}
+    # for k, v in state.items():
+    #     # keep ONLY parameters under model.*, but drop arcface
+    #     if not k.startswith("model."):
+    #         continue
+    #     if "arcface" in k or "arc_face" in k:
+    #         continue
+
+    #     # strip "model." prefix
+    #     new_k = k.replace("model.", "", 1)
+    #     filtered[new_k] = v
+
+    # print("Loaded teacher keys:", len(filtered))
+    # teacher.load_state_dict(filtered, strict=True)
+    # teacher.eval()
+    # for p in teacher.parameters():
+    #     p.requires_grad = False
+
+    # # ---- Load Dual Model ----
+    # dual = load_dual_model(CKPT, device=device)
+    # # joint_ckpt = torch.load(ckpt_joint_trained, map_location=device)
+    # # joint_state = joint_trained_model_weights(joint_ckpt['state_dict'])
+    # # dual.load_state_dict(joint_state, strict=True)
+    # print("Loaded dual model.")
+    ckpt_loaded = torch.load(CKPT, map_location=device)
+    ckpt_loaded_state = ckpt_loaded["state_dict"]
     filtered = {}
-    for k, v in state.items():
+    for k, v in ckpt_loaded_state.items():
         # keep ONLY parameters under model.*, but drop arcface
         if not k.startswith("model."):
             continue
@@ -451,47 +537,42 @@ if __name__ == "__main__":
         new_k = k.replace("model.", "", 1)
         filtered[new_k] = v
 
-    print("Loaded teacher keys:", len(filtered))
-    teacher.load_state_dict(filtered, strict=True)
-    teacher.eval()
-    for p in teacher.parameters():
-        p.requires_grad = False
+    model = TeacherStudentSpeakerEmbeddingModel(num_speakers=2, emb_dim=256).to(device)
+    model.load_state_dict(filtered, strict=True)
 
-    # ---- Load Dual Model ----
-    dual = load_dual_model(CKPT, device=device)
-    # joint_ckpt = torch.load(ckpt_joint_trained, map_location=device)
-    # joint_state = joint_trained_model_weights(joint_ckpt['state_dict'])
-    # dual.load_state_dict(joint_state, strict=True)
-    print("Loaded dual model.")
+    model.eval()  
+
+    assert all(not m.training for m in model.modules())
 
     # ---- Extract Embeddings ----
     embs, labels = extract_dual_embeddings_with_teacher(
-        dual_model=dual,
-        teacher_model=teacher,
+        # dual_model=dual,
+        # teacher_model=teacher,
+        model = model,
         metadata=metadata,
         device=device,
         verbose=True,
     )
 
     #save the cached embeddings as a pickle file
-    with open("cached_embeddings.pkl", "wb") as f:
+    with open("cached_embeddings_cordlandwehr.pkl", "wb") as f:
         pickle.dump(CACHED_EMBS, f)
-    print("Saved cached embeddings to cached_embeddings.pkl")
+    print("Saved cached embeddings to cached_embeddings_cordlandwehr.pkl")
     
-    # print(f"Extracted {len(embs)} embeddings for {len(np.unique(labels))} speakers.")
+    print(f"Extracted {len(embs)} embeddings for {len(np.unique(labels))} speakers.")
 
-    # # ---- Compute Metrics ----
-    # print(f"\nComputing clustering metrics for overlap {ovlp}...")
-    # res = compute_clustering_metrics(embs, labels)
+    # ---- Compute Metrics ----
+    print(f"\nComputing clustering metrics..")
+    res = compute_clustering_metrics(embs, labels)
 
-    # print("\n=== Clustering / Separation Metrics (Full Dev) ===")
-    # print(f"same_mean_cos = {res['same_mean_cos']:.4f}")
-    # print(f"diff_mean_cos = {res['diff_mean_cos']:.4f}")
-    # print(f"separation    = {res['separation']:.4f}")
-    # print(f"cluster_acc   = {res['cluster_acc']:.4f}")
-    # print(f"nmi           = {res['nmi']:.4f}")
-    # print(f"ari           = {res['ari']:.4f}")
-    # print(f"silhouette    = {res['silhouette']:.4f}")
+    print("\n=== Clustering / Separation Metrics (Full Dev) ===")
+    print(f"same_mean_cos = {res['same_mean_cos']:.4f}")
+    print(f"diff_mean_cos = {res['diff_mean_cos']:.4f}")
+    print(f"separation    = {res['separation']:.4f}")
+    print(f"cluster_acc   = {res['cluster_acc']:.4f}")
+    print(f"nmi           = {res['nmi']:.4f}")
+    print(f"ari           = {res['ari']:.4f}")
+    print(f"silhouette    = {res['silhouette']:.4f}")
 
-    # # ---- TSNE on subset of speakers ----
-    # plot_tsne_subset(embs, labels, num_speakers=20, save_path=TSNE_SAVE_PATH)
+    # ---- TSNE on subset of speakers ----
+    plot_tsne_subset(embs, labels, num_speakers=20, save_path=TSNE_SAVE_PATH)

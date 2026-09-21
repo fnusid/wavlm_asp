@@ -10,14 +10,14 @@ from pytorch_lightning.loggers import WandbLogger
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from dataset import LibriMixDataModule       
-from model import SpeakerEncoderDualWrapper   
+# from model import SpeakerEncoderDualWrapper   
 from loss import LossWraper
 from metrics import EmbeddingMetrics
 import wandb
 import sys
-sys.path.append("/home/sidharth./codebase/")
-
-from wavlm_single_embedding.model import SpeakerEncoderWrapper as SingleSpeakerEncoderWrapper
+sys.path.append("/home/sidcs.csegpu1/codebase")
+from teacher_student_speaker_embedding.model import TeacherStudentSpeakerEmbeddingModel
+# from wavlm_single_embedding.model import SpeakerEncoderWrapper as SingleSpeakerEncoderWrapper
 import random
 random.seed(42)
 import warnings
@@ -32,27 +32,61 @@ def strip_model_prefix(state):
             new_state[k] = v
     return new_state
 
+def load_and_verify_teacher(model, checkpoint_path, prefix=""):
+    """
+    model: TeacherStudentSpeakerEmbeddingModel
+
+    prefix:
+      ""         if checkpoint keys are fbank.*, resnet.*, ...
+      "teacher." if keys are teacher.fbank.*, teacher.resnet.*, ...
+      "model."   if keys are model.fbank.*, model.resnet.*, ...
+
+    Use the actual prefix in YOUR checkpoint.
+    """
+    checkpoint = torch.load(
+        checkpoint_path,
+        map_location="cpu",
+        weights_only=True,
+    )
+    state = checkpoint.get("state_dict", checkpoint)
+   
+    teacher_state = {
+        key[len(prefix):]: value
+        for key, value in state.items()
+        if key.startswith(prefix)
+    }
+
+    if not teacher_state:
+        raise RuntimeError(f"No checkpoint keys match prefix {prefix!r}")
+
+    # Fails on missing/extra keys instead of silently accepting a partial load.
+    model.teacher.load_state_dict(teacher_state, strict=True)
+    model.teacher.requires_grad_(False)
+    model.teacher.eval()
+
+    # Verify parameters AND buffers, including BatchNorm running statistics.
+    for name, actual in model.teacher.state_dict().items():
+        expected = teacher_state[name].to(
+            device=actual.device, dtype=actual.dtype
+        )
+        torch.testing.assert_close(
+            actual, expected, rtol=0, atol=0,
+            msg=f"Teacher checkpoint mismatch: {name}",
+        )
+
+    print(f"Verified teacher checkpoint: {checkpoint_path}")
+
 class MySpEmb(pl.LightningModule):
     def __init__(
         self,
         lr: float = 1e-4,
         finetune_encoder: bool = False,
         emb_dim: int = 256,
-        slot_repulsion_weight: float = 0.1,
-        slot_repulsion_margin: float = 0.0,
-        speaker_map_path: str = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/Libriuni_03_08/Libri2Mix_ovl30to80/wav16k/min/metadata/train360_mapping.json",
+        speaker_map_path: str = "/home/sidcs.csegpu1/datasets/LibriMix/LibriMix/Libriuni_03_08/Libri2Mix_ovl30to80/wav16k/min/metadata/train360_mapping.json",
     ):
         super().__init__()
         self.save_hyperparameters()
 
-        # -----------------------------
-        # 1. Speaker Encoder model
-        # -----------------------------
-        self.model = SpeakerEncoderDualWrapper(emb_dim=emb_dim, finetune_wavlm=True)
-
-        # Optionally unfreeze wavlm if finetuning
-        # if finetune_encoder:
-        #     self.model.wavlm.requires_grad_(True)
 
         # -----------------------------
         # 2. ArcFace classification head
@@ -61,43 +95,50 @@ class MySpEmb(pl.LightningModule):
             speaker_map = json.load(f)
 
         self.cosine_loss = LossWraper(
-            slot_repulsion_weight=slot_repulsion_weight,
-            slot_repulsion_margin=slot_repulsion_margin,
             emb_dim=emb_dim,
         )
-        #Get the teacher model
-        self.single_sp_model = SingleSpeakerEncoderWrapper(emb_dim=emb_dim)
-        teacher_ckpt_path = "/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_tr360/best-epoch=62-val_separation=0.000.ckpt"
+        self.model = TeacherStudentSpeakerEmbeddingModel(num_speakers=2, emb_dim=emb_dim).to("cuda")
+        teacher_ckpt_path = "/home/sidcs.csegpu1/model_ckpts/cord_landwehr_arcface_tr460/best-epoch=58.ckpt"
+        load_and_verify_teacher(
+            self.model,
+            checkpoint_path=teacher_ckpt_path,
+            prefix="model.",  # Change to your actual checkpoint prefix.
+        )
 
-        ckpt = torch.load(teacher_ckpt_path, map_location="cpu")
-        state = ckpt["state_dict"]
+        self.model.train()
 
-        filtered = {}
-        for k, v in state.items():
-            # only keep model.encoder.* or model.wavlm.*, model.projector.*, model.pooling.*
-            if k.startswith("model.") and ("arcface" not in k):
-                filtered[k.replace("model.", "", 1)] = v
+        assert not self.model.teacher.training
+        assert all(not p.requires_grad for p in self.model.teacher.parameters())
 
-        print("Loaded teacher keys:", len(filtered))
+        # ckpt = torch.load(teacher_ckpt_path, map_location="cuda")
+        # state_dict = ckpt.get("state_dict", ckpt)
 
-        self.single_sp_model.load_state_dict(filtered, strict=True)
-        self.single_sp_model.eval()
-        for param in self.single_sp_model.parameters():
-            param.requires_grad = False
-
-
+        # new_state = {}
+        # for k, v in state_dict.items():
+        #     if k.startswith("model."):
+        #         new_state[k.replace("model.", "", 1)] = v
+        #     else:
+        #         new_state[k] = v
+        # self.model.teacher.load_state_dict(new_state, strict=False)
+        # self.model.teacher.eval()
 
         # -----------------------------
         # 3. Embedding metrics (for validation)
         # -----------------------------
         self.metrics = EmbeddingMetrics(device="cuda")  # will overwrite device at runtime
 
-    def forward(self, wav):
+    def forward(self, wav, sources=None):
         """
         wav: [B, T] (or [B, 1, T])
-        returns: [B, 2, emb_dim]
+        sources: [B, K, T] optional clean per-speaker sources, needed to
+                 compute the teacher targets during training
+        returns a dict with:
+            d_hat:   [B, K, emb_dim]       student utterance embeddings
+            d_hat_t: [B, K, emb_dim, T']    student frame-wise embeddings
+            d:       [B, K, emb_dim]       teacher target embeddings
+                     (only present if `sources` is given)
         """
-        return self.model(wav)
+        return self.model(wav, sources=sources)
 
     # -----------------------------
     # TRAINING
@@ -109,22 +150,24 @@ class MySpEmb(pl.LightningModule):
           labels: [B, 2]  (speaker IDs, already mapped to [0..num_classes-1])
         """
         mix, source, labels = batch
-        emb = self.forward(mix)                    # [B, 2, emb_dim]
-        silence_mask = source.abs().sum(dim=-1) <= 1e-8
-        #change here
-        with torch.no_grad():
-            emb1 = self.single_sp_model(source[:, 0, :])  # [B, emb_dim]
-            emb2 = self.single_sp_model(source[:, 1, :])  # [B, emb_dim]
-            gt_embs = torch.stack([emb1, emb2], dim=1)  # [B, 2, emb_dim]
-        
-        loss_out = self.cosine_loss(emb, gt_embs, silence_mask=silence_mask, return_components=True)
+        emb_dict = self.forward(mix, sources=source)
+        '''
+        emb_dict:
+            d_hat:   [B, K, emb_dim]       student utterance embeddings
+            d_hat_t: [B, K, emb_dim, T']    student frame-wise embeddings
+            d:       [B, K, emb_dim]       teacher target embeddings
+        '''
+
+        loss_out = self.cosine_loss(emb_dict["d_hat_t"], emb_dict["d"])
         loss = loss_out["loss"]
+
         if batch_idx == 0 and self.current_epoch == 0:
             with torch.no_grad():
-                cos_gt = F.cosine_similarity(gt_embs[:,0,:], gt_embs[:,1,:], dim=-1).mean()
-                cos_pred = F.cosine_similarity(emb[:,0,:], emb[:,1,:], dim=-1).mean()
-                print("Mean cos(gt1, gt2) =", cos_gt.item())
-                print("Mean cos(pred1, pred2) =", cos_pred.item())
+                d_hat, d = emb_dict["d_hat"], emb_dict["d"]
+                cos_gt = F.cosine_similarity(d[:, 0, :], d[:, 1, :], dim=-1).mean()
+                cos_pred = F.cosine_similarity(d_hat[:, 0, :], d_hat[:, 1, :], dim=-1).mean()
+                print("Mean cos(teacher_1, teacher_2) =", cos_gt.item())
+                print("Mean cos(student_1, student_2) =", cos_pred.item())
 
         self.log(
             "train/loss",
@@ -132,38 +175,6 @@ class MySpEmb(pl.LightningModule):
             on_step=True,
             on_epoch=True,
             prog_bar=True,
-            logger=True,
-            batch_size=mix.shape[0],
-        )
-        self.log(
-            "train/match_loss",
-            loss_out["match_loss"],
-            on_step=True,
-            on_epoch=True,
-            logger=True,
-            batch_size=mix.shape[0],
-        )
-        self.log(
-            "train/slot_repulsion_loss",
-            loss_out["slot_repulsion_loss"],
-            on_step=True,
-            on_epoch=True,
-            logger=True,
-            batch_size=mix.shape[0],
-        )
-        self.log(
-            "train/slot_cosine_mean",
-            loss_out["slot_cosine_mean"],
-            on_step=True,
-            on_epoch=True,
-            logger=True,
-            batch_size=mix.shape[0],
-        )
-        self.log(
-            "train/silence_proto_norm",
-            loss_out["silence_proto_norm"],
-            on_step=True,
-            on_epoch=True,
             logger=True,
             batch_size=mix.shape[0],
         )
@@ -179,13 +190,26 @@ class MySpEmb(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         """
-        For now we just compute arcface loss as a simple val loss.
-        The clustering metrics are done in validation_epoch_end
-        on the entire validation set.
+        Computes the same teacher-student PIT loss as training_step for a
+        val/loss curve. The clustering metrics are done in
+        validation_epoch_end on the entire validation set.
         """
         mix, source, labels = batch
-        emb = self.forward(mix)                   # [B, 2, emb_dim]
+        emb_dict = self.forward(mix, sources=source)
+        emb = emb_dict["d_hat"]                    # [B, 2, emb_dim]
         #labels : [B, 2]
+
+        loss_out = self.cosine_loss(emb_dict["d_hat_t"], emb_dict["d"])
+
+        self.log(
+            "val/loss",
+            loss_out["loss"],
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+            logger=True,
+            batch_size=mix.shape[0],
+        )
 
         self.val_embs.append(emb.detach().cpu())
         self.val_labels.append(labels.detach().cpu())
@@ -262,8 +286,8 @@ class MySpEmb(pl.LightningModule):
 # MAIN
 # ---------------------------------------
 if __name__ == "__main__":
-    DATA_ROOT = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix" 
-    SPEAKER_MAP = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/Libriuni_05_08/Libri2Mix_ovl50to80/wav16k/min/metadata/train360_mapping.json"
+    DATA_ROOT = "/home/sidcs.csegpu1/datasets/LibriMix/LibriMix" 
+    SPEAKER_MAP = "/home/sidcs.csegpu1/datasets/LibriMix/LibriMix/Libriuni_05_08/Libri2Mix_ovl50to80/wav16k/min/metadata/train360_mapping.json"
 
 
     dm = LibriMixDataModule(
@@ -283,25 +307,25 @@ if __name__ == "__main__":
 
     wandb_logger = WandbLogger(
         project="librispeech-speaker-encoder",
-        name="ft_wavlm_linear_dualemb_tr360",
+        name="cord_landwehr_dualemb_tr360_cos",
         # name='test_run',
         log_model=False,
-        save_dir="/mnt/disks/data/model_ckpts/librispeech_asp_ft_wavlm_linear_dualemb_tr360/wandb_logs",
+        save_dir="/home/sidcs.csegpu1/model_ckpts/cord_landwehr_dualemb_tr360_cos/wandb_logs",
     )
 
     ckpt = pl.callbacks.ModelCheckpoint(
-        monitor="train/loss",
+        monitor="val/loss",
         mode="min",
-        save_top_k=1,
+        save_top_k=-1,
         filename="best-{epoch}-{val_separation:.3f}",
-        dirpath="/mnt/disks/data/model_ckpts/librispeech_asp_ft_wavlm_linear_dualemb_tr360/"
+        dirpath="/home/sidcs.csegpu1/model_ckpts/librispeech_cord_landwehr_dualemb_tr360_cos/"
     )
 
     trainer = pl.Trainer(
         strategy="ddp_find_unused_parameters_true",
         accelerator="gpu",
-        devices=[0, 1, 2, 3],
-        max_epochs=50,
+        devices=[0, 1, 2, 3, 4, 5, 6, 7],
+        max_epochs=60,
         logger=wandb_logger,
         callbacks=[ckpt],
         gradient_clip_val=5.0,
