@@ -2,9 +2,23 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import WavLMModel, WavLMConfig
-from speechbrain.lobes.models.ECAPA_TDNN import AttentiveStatisticsPooling
+# from speechbrain.lobes.models.ECAPA_TDNN import AttentiveStatisticsPooling
 import torchaudio
 import math
+
+
+class CausalConv1D(nn.Module):
+    def __init__(self, c_in, c_out, kernel_size, stride, dilation):
+        super().__init__()
+        self.padding = dilation * (kernel_size - 1)
+        self.conv = nn.Conv1d(c_in, c_out, kernel_size=kernel_size, stride=stride, padding=0, dilation=dilation)
+    
+    def forward(self, x):
+        x_pad = F.pad(x, (self.padding, 0), mode="constant", value=0)
+        x = self.conv(x_pad)
+        return x
+
+        
 
 class SEModule(nn.Module):
     def __init__(self, channels, bottleneck=128):
@@ -22,43 +36,84 @@ class SEModule(nn.Module):
         x = self.se(input)
         return input * x
 
+
+def Cumsum_Pool(x):
+    T = x.size(-1)
+    count = torch.arange(1, T + 1, device=x.device)
+
+    y = x.cumsum(dim=-1) / count  # [B, C, T]
+    return y
+
+
+class Causal_SEModule(nn.Module):
+    def __init__(self, channels, bottleneck=128):
+        super(Causal_SEModule, self).__init__()
+        self.se = nn.Sequential(
+            CausalConv1D(channels, bottleneck, 1, 1, 1),
+            nn.ReLU(),
+            CausalConv1D(bottleneck, channels, 1, 1, 1),
+            nn.Sigmoid(),
+        )
+    def forward(self, input):
+        x = Cumsum_Pool(input) #[B, C, T]
+        x = self.se(x)
+        return input * x
+
 class Bottle2neck(nn.Module):
 
     def __init__(self, inplanes, planes, kernel_size=None, dilation=None, scale = 8):
         super(Bottle2neck, self).__init__()
         width       = int(math.floor(planes / scale))
-        self.conv1  = nn.Conv1d(inplanes, width*scale, kernel_size=1)
-        self.bn1    = nn.BatchNorm1d(width*scale)
+        # self.conv1  = nn.Conv1d(inplanes, width*scale, kernel_size=1)
+        self.conv1 = CausalConv1D(inplanes, width*scale, kernel_size=1, stride=1, dilation=1)
+        # self.bn1    = nn.BatchNorm1d(width*scale)
+        self.ln1 = nn.LayerNorm(width*scale)
         self.nums   = scale -1
         convs       = []
-        bns         = []
+        # bns         = []
+        lns         = []
         num_pad = math.floor(kernel_size/2)*dilation
         for i in range(self.nums):
-            convs.append(nn.Conv1d(width, width, kernel_size=kernel_size, dilation=dilation, padding=num_pad))
-            bns.append(nn.BatchNorm1d(width))
+            # convs.append(nn.Conv1d(width, width, kernel_size=kernel_size, dilation=dilation, padding=num_pad))
+            convs.append(CausalConv1D(width, width, kernel_size, 1, dilation))
+            # bns.append(nn.BatchNorm1d(width))
+            lns.append(nn.LayerNorm(width))
         self.convs  = nn.ModuleList(convs)
-        self.bns    = nn.ModuleList(bns)
-        self.conv3  = nn.Conv1d(width*scale, planes, kernel_size=1)
-        self.bn3    = nn.BatchNorm1d(planes)
+        # self.bns    = nn.ModuleList(bns)
+        self.lns = nn.ModuleList(lns)
+        # self.conv3  = nn.Conv1d(width*scale, planes, kernel_size=1)
+        self.conv3 = CausalConv1D(width*scale, planes, 1,1, 1)
+        # self.bn3    = nn.BatchNorm1d(planes)
+        self.ln3 = nn.LayerNorm(planes)
         self.relu   = nn.ReLU()
         self.width  = width
-        self.se     = SEModule(planes)
+        # self.se     = SEModule(planes)
+        self.se = Causal_SEModule(planes)
 
     def forward(self, x):
+        #x : [B, C, T]
+     
         residual = x
         out = self.conv1(x)
         out = self.relu(out)
-        out = self.bn1(out)
+        #reshape it 
+        out = out.transpose(1, 2) #[B, T, C]
+        out = self.ln1(out) 
+        #reshape it back
+        out = out.transpose(2, 1) #[B, C, T]
 
-        spx = torch.split(out, self.width, 1)
-        for i in range(self.nums):
+        spx = torch.split(out, self.width, 1) # 8 arrays of [B, C/8, T]
+        for i in range(self.nums): #7
           if i==0:
             sp = spx[i]
           else:
             sp = sp + spx[i]
           sp = self.convs[i](sp)
           sp = self.relu(sp)
-          sp = self.bns[i](sp)
+          #reshape
+          sp = sp.transpose(1, 2)
+          sp = self.lns[i](sp)
+          sp = sp.transpose(1,2 )
           if i==0:
             out = sp
           else:
@@ -67,7 +122,9 @@ class Bottle2neck(nn.Module):
 
         out = self.conv3(out)
         out = self.relu(out)
-        out = self.bn3(out)
+        out = out.transpose(1, 2)
+        out = self.ln3(out)
+        out = out.transpose(1, 2)
         
         out = self.se(out)
         out += residual
@@ -130,17 +187,24 @@ class ECAPA_TDNN_encoder(nn.Module):
 
         super(ECAPA_TDNN_encoder, self).__init__()
 
+        n_fft, hop_length = 512, 160
         self.torchfbank = torch.nn.Sequential(
-            PreEmphasis(),            
-            torchaudio.transforms.MelSpectrogram(sample_rate=16000, n_fft=512, win_length=400, hop_length=160, \
-                                                 f_min = 20, f_max = 7600, window_fn=torch.hamming_window, n_mels=80),
+            PreEmphasis(),
+            torchaudio.transforms.MelSpectrogram(sample_rate=16000, n_fft=n_fft, win_length=400, hop_length=hop_length, \
+                                                 f_min = 20, f_max = 7600, window_fn=torch.hamming_window, n_mels=80,
+                                                 center=False),
             )
+        # center=False makes each STFT frame look only at past+current audio;
+        # left-pad by n_fft - hop_length so it still gets a frame near t=0
+        self.stft_pad = n_fft - hop_length
 
         self.specaug = FbankAug() # Spec augmentation
         self.d_model = 1536
-        self.conv1  = nn.Conv1d(80, C, kernel_size=5, stride=1, padding=2)
+        # self.conv1  = nn.Conv1d(80, C, kernel_size=5, stride=1, padding=2)
+        self.conv1 = CausalConv1D(80, C, kernel_size=5, stride=1, dilation=1)
         self.relu   = nn.ReLU()
-        self.bn1    = nn.BatchNorm1d(C)
+        # self.bn1    = nn.BatchNorm1d(C)
+        self.ln1 = nn.LayerNorm(C)
         self.layer1 = Bottle2neck(C, C, kernel_size=3, dilation=2, scale=8)
         self.layer2 = Bottle2neck(C, C, kernel_size=3, dilation=3, scale=8)
         self.layer3 = Bottle2neck(C, C, kernel_size=3, dilation=4, scale=8)
@@ -149,26 +213,36 @@ class ECAPA_TDNN_encoder(nn.Module):
         self.attention = nn.Sequential(
             nn.Conv1d(4608, 256, kernel_size=1),
             nn.ReLU(),
-            nn.BatchNorm1d(256),
+            # nn.BatchNorm1d(256),
+            nn.LayerNorm(256),
             nn.Tanh(), # I add this layer
             nn.Conv1d(256, self.d_model, kernel_size=1),
             nn.Softmax(dim=2),
             )
-        self.bn5 = nn.BatchNorm1d(3072)
+        # self.bn5 = nn.BatchNorm1d(3072)
+        self.ln5 = nn.LayerNorm(3072)
         self.fc6 = nn.Linear(3072, 256)
-        self.bn6 = nn.BatchNorm1d(256)
-
+        # self.bn6 = nn.BatchNorm1d(256)
+        self.ln6 = nn.LayerNorm(256)
 
     def forward(self, x, aug=False):
         with torch.no_grad():
+            x = F.pad(x, (self.stft_pad, 0), mode="reflect")
             x = self.torchfbank(x)+1e-6
-            x = x.log()   
-            x = x - torch.mean(x, dim=-1, keepdim=True)
+            x = x.log()
+            x = x - Cumsum_Pool(x)  # causal running mean, instead of the full-utterance mean
             if aug == True:
                 x = self.specaug(x)
-        x = self.conv1(x)
-        x = self.relu(x)
-        x = self.bn1(x)
+ 
+        # x shape [B, 80, T], 80 : Mel spec features
+        x = self.conv1(x) #[B, C, T]
+       
+        x = self.relu(x) #[B, C, T]
+        #reshape it to to [B, T, C] 
+        x = torch.transpose(x, 2, 1)
+        x = self.ln1(x) #[B, T, C]
+        x = torch.transpose(x, 2, 1)
+        #reshape it back to [B, C, T]
 
         x1 = self.layer1(x)
         x2 = self.layer2(x+x1)
@@ -182,18 +256,65 @@ class ECAPA_TDNN_encoder(nn.Module):
 
 
 
-class SpeakerEncoder(nn.Module):
-    def __init__(self, feat_dim, emb_dim=256):
+class Causal_AttentiveStatisticsPooling(nn.Module):
+    """
+    Streaming ASP: mean/std and attention weights at time t depend only on
+    frames 0..t. Returns a running [mean; std] per frame instead of a single
+    pooled vector for the whole utterance.
+    """
+    def __init__(self, channels, attention_channels=128, eps=1e-8):
         super().__init__()
-        self.asp = AttentiveStatisticsPooling(feat_dim)
+        self.eps = eps
+        self.tdnn = CausalConv1D(channels * 3, attention_channels, kernel_size=1, stride=1, dilation=1)
+        self.tanh = nn.Tanh()
+        self.conv = CausalConv1D(attention_channels, channels, kernel_size=1, stride=1, dilation=1)
+
+    def forward(self, x):
+        # x: [B, C, T]
+        run_mean = Cumsum_Pool(x)  # causal running mean, [B, C, T]
+        run_var = (Cumsum_Pool(x.pow(2)) - run_mean.pow(2)).clamp(min=self.eps)
+        run_std = torch.sqrt(run_var)
+
+        attn_in = torch.cat([x, run_mean, run_std], dim=1)  # [B, 3C, T]
+        logits = self.conv(self.tanh(self.tdnn(attn_in)))   # [B, C, T]
+        # clamp instead of subtracting a running max: a per-t max would break
+        # the cumsum decomposition used below
+        logits = logits.clamp(-15, 15)
+        w = torch.exp(logits)
+
+        num1 = torch.cumsum(w * x, dim=-1)
+        num2 = torch.cumsum(w * x.pow(2), dim=-1)
+        den = torch.cumsum(w, dim=-1)
+
+        mean = num1 / den
+        var = (num2 / den - mean.pow(2)).clamp(min=self.eps)
+        std = torch.sqrt(var)
+
+        return torch.cat([mean, std], dim=1)  # [B, 2C, T]
+
+
+class SpeakerEncoder(nn.Module):
+    def __init__(self, feat_dim, emb_dim=256, streaming=False):
+        super().__init__()
+        # self.asp = AttentiveStatisticsPooling(feat_dim)
+        self.asp = Causal_AttentiveStatisticsPooling(feat_dim)
         self.linear = nn.Linear(feat_dim * 2, emb_dim)
+        self.streaming = streaming
 
     def forward(self, x):
         """
         x: [B, D, T] (projected features)
+        streaming=True  -> [B, T, emb_dim], a running embedding per frame
+        streaming=False -> [B, emb_dim], one embedding per utterance (final
+                            frame of the running stats == the full-utterance
+                            causal stats, since it has seen every frame)
         """
-        pooled = self.asp(x).squeeze(-1)  # [B, 2D]
-        emb = self.linear(pooled)         # [B, emb_dim]
+        pooled = self.asp(x)  # [B, 2D, T]
+        if self.streaming:
+            pooled = pooled.transpose(1, 2)   # [B, T, 2D]
+        else:
+            pooled = pooled[:, :, -1]         # [B, 2D]
+        emb = self.linear(pooled)
         return F.normalize(emb, p=2, dim=-1)
 
 
@@ -202,22 +323,23 @@ class SpeakerEncoderDualWrapper(nn.Module):
     For Phase 1: this is actually a speaker encoder
     using WavLM + projection + ASP.
     """
-    def __init__(self, emb_dim=256):
+    def __init__(self, emb_dim=256, streaming=False):
         super().__init__()
 
         # Load WavLM
-       
+
         # self.encoder = ECAPA_TDNN_encoder(C=2048)
         # self.encoder = ECAPA_TDNN_encoder(C=1024)
         self.encoder = ECAPA_TDNN_encoder(C=3072)
         self.emb_dim = emb_dim
+        self.streaming = streaming
 
         # Linear 768 -> 256
         self.projector = nn.Linear(self.encoder.d_model, 2*emb_dim)
 
         # ASP-based speaker encoder
-        self.encoder1 = SpeakerEncoder(feat_dim=emb_dim, emb_dim=emb_dim)
-        self.encoder2 = SpeakerEncoder(feat_dim=emb_dim, emb_dim=emb_dim)
+        self.encoder1 = SpeakerEncoder(feat_dim=emb_dim, emb_dim=emb_dim, streaming=streaming)
+        self.encoder2 = SpeakerEncoder(feat_dim=emb_dim, emb_dim=emb_dim, streaming=streaming)
 
     def forward(self, audio):
         """
@@ -241,15 +363,17 @@ class SpeakerEncoderDualWrapper(nn.Module):
         proj1 = proj1.transpose(1, 2)    # [B, 256, T]
         proj2 = proj2.transpose(1, 2)    # [B, 256, T]
 
-        # Get speaker embedding
-        emb1 = self.encoder1(proj1)       # [B, 256]
-        emb2 = self.encoder2(proj2)       # [B, 256]
-        emb = torch.stack([emb1, emb2], dim=1) #[B,2,256]
+        # Get speaker embedding: [B, T, 256] per-frame if streaming,
+        # else [B, 256] one embedding per utterance
+        emb1 = self.encoder1(proj1)
+        emb2 = self.encoder2(proj2)
+        stack_dim = 2 if self.streaming else 1
+        emb = torch.stack([emb1, emb2], dim=stack_dim)  # [B,T,2,256] or [B,2,256]
         return emb
 
 
 if __name__ == "__main__":
-    breakpoint()
+
     model = SpeakerEncoderDualWrapper(emb_dim=256)
     dummy_audio = torch.randn(2, 16000 * 3)  #
     emb = model(dummy_audio)
