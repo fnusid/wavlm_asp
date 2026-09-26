@@ -13,10 +13,13 @@ from sklearn.metrics import (
     roc_curve,
 )
 
-from model import SpeakerEncoderWrapper  # your single-speaker model
+# from model import SpeakerEncoderWrapper  # your single-speaker model
+import sys
+sys.path.append("/home/sidcs.csegpu1/codebase")
+from teacher_student_speaker_embedding.model import Teacher
 import random
 add_noise = True  # set True to enable noise corruption
-noise_dir = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/wham_noise/tt"
+noise_dir = "/home/sidcs.csegpu1/datasets/LibriMix/LibriMix/wham_noise/tt"
 noise_files = [
     os.path.join(noise_dir, f)
     for f in os.listdir(noise_dir)
@@ -61,7 +64,7 @@ def load_model(ckpt_path, emb_dim=256, device="cuda"):
         else:
             new_state[k] = v
 
-    model = SpeakerEncoderWrapper(emb_dim=emb_dim)
+    model = Teacher(emb_dim=emb_dim)
     model.load_state_dict(new_state, strict=False)
     model.to(device)
     model.eval()
@@ -104,7 +107,7 @@ def embed_utterance(model, wav_path, cache, device):
         wav = mix_with_snr(wav, noise_wav.squeeze(0), snr)
 
     with torch.no_grad():
-        emb = model(wav)                # [1, D]
+        emb,_ = model(wav)                # [1, D]
 
     emb_np = emb.squeeze(0).cpu().numpy()
     cache[wav_path] = emb_np
@@ -250,7 +253,7 @@ def load_trials_vox1_txt(txt_path):
     1,id01234/xxxxxx.wav,id05678/yyyyyy.wav
     """
   
-    path_prefix = "/mnt/disks/data/datasets/Datasets/voxceleb/vox1/eval/wav"
+    path_prefix = "/home/sidcs.csegpu1/datasets/voxceleb/vox1/eval/wav"
     paths1, paths2, labels = [], [], []
 
     with open(txt_path, "r") as f:
@@ -314,10 +317,10 @@ def compute_eer_from_trials(model, trial_paths1, trial_paths2, trial_labels, cac
 # -------------------------------------------------
 if __name__ == "__main__":
     # ---- EDIT THESE PATHS ----
-    METADATA_TXT = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/LibriSpeech/libri_test_clean.txt"
-    CKPT = "/mnt/disks/data/model_ckpts/ft_wavlm_asp_arcface_tr460/best-epoch=0.ckpt"
-    TRIALS_CSV = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/LibriSpeech/dev_clean_sp_ver_pairs.csv"  # <-- your CSV with utt1,utt2,label
-    TRIALS_CSV_VOX1 = "/mnt/disks/data/datasets/Datasets/Vox1_sp_ver/svs.txt"
+    METADATA_TXT = "/home/sidcs.csegpu1/datasets/LibriMix/LibriMix/LibriSpeech/libri_test_clean.txt"
+    CKPT = "/home/sidcs.csegpu1/model_ckpts/cord_landwehr_arcface_tr460/best-epoch=59.ckpt"
+    TRIALS_CSV = "/home/sidcs.csegpu1/datasets/LibriMix/LibriMix/LibriSpeech/dev_clean_sp_ver_pairs.csv"  # <-- your CSV with utt1,utt2,label
+    TRIALS_CSV_VOX1 = "/home/sidcs.csegpu1/datasets/Vox1_sp_ver/svs.txt"
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     # device='cpu'

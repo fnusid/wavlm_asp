@@ -10,12 +10,32 @@ from pytorch_lightning.loggers import WandbLogger
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from dataset import LibriDataModule          # <-- single-speaker Libri datamodule
-from model import SpeakerEncoderWrapper   # <-- your WavLM+ASP encoder
+# from model import SpeakerEncoderWrapper   # <-- your WavLM+ASP encoder
 # from resemblyzer import VoiceEncoder
 from loss import LossWraper
 from metrics import EmbeddingMetrics
 import wandb
+import sys
+sys.path.append("/home/sidcs.csegpu1/codebase")
+from teacher_student_speaker_embedding.model import Teacher
 
+import warnings
+warnings.filterwarnings("ignore")
+
+# torchaudio's ffmpeg StreamReader deprecation warning slips past the blanket
+# "ignore" above (some downstream import resets the filter list via
+# warnings.simplefilter), so drop it directly at the display step instead.
+_SUPPRESSED_WARNING_SNIPPETS = (
+    "StreamingMediaDecoder has been deprecated",
+    "find_unused_parameters=True was specified in DDP constructor",
+)
+_default_showwarning = warnings.showwarning
+def _filtered_showwarning(message, category, filename, lineno, file=None, line=None):
+    text = str(message)
+    if any(snippet in text for snippet in _SUPPRESSED_WARNING_SNIPPETS):
+        return
+    _default_showwarning(message, category, filename, lineno, file, line)
+warnings.showwarning = _filtered_showwarning
 
 class MySpEmb(pl.LightningModule):
     def __init__(
@@ -24,7 +44,7 @@ class MySpEmb(pl.LightningModule):
         finetune_encoder: bool = False,
         emb_dim: int = 256,
         # speaker_map_path: str = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/LibriSpeech/train-100_mapping.json",
-        speaker_map_path: str = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/LibriSpeech/train-360_mapping.json"
+        speaker_map_path: str = "/home/sidcs.csegpu1/datasets/LibriMix/LibriMix/LibriSpeech/train-360_mapping.json"
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -32,7 +52,8 @@ class MySpEmb(pl.LightningModule):
         # -----------------------------
         # 1. Speaker Encoder model
         # -----------------------------
-        self.model = SpeakerEncoderWrapper(emb_dim=emb_dim)
+        # self.model = SpeakerEncoderWrapper(emb_dim=emb_dim)
+        self.model = Teacher(emb_dim=256)
 
         # # Optionally unfreeze wavlm if finetuning
         # if finetune_encoder:
@@ -75,7 +96,7 @@ class MySpEmb(pl.LightningModule):
           labels: [B]  (speaker IDs, already mapped to [0..num_classes-1])
         """
         wav, labels = batch
-        emb = self.forward(wav)                    # [B, emb_dim]
+        emb,_ = self.forward(wav)                    # [B, emb_dim]
         loss = self.arcface_loss(emb, labels)      # scalar
 
         self.log(
@@ -104,7 +125,8 @@ class MySpEmb(pl.LightningModule):
         on the entire validation set.
         """
         wav, labels = batch
-        emb = self.forward(wav)
+        # emb = self.forward(wav)
+        emb,_ = self.forward(wav)
 
         self.val_embs.append(emb.detach().cpu())
         self.val_labels.append(labels.detach().cpu())
@@ -177,16 +199,16 @@ class MySpEmb(pl.LightningModule):
 # MAIN
 # ---------------------------------------
 if __name__ == "__main__":
-    DATA_ROOT = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/LibriSpeech"
+    DATA_ROOT = "/home/sidcs.csegpu1/datasets/LibriMix/LibriMix/LibriSpeech"
 
-    TRAIN_SPK_MAP = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/LibriSpeech/train-360_mapping.json"
+    TRAIN_SPK_MAP = "/home/sidcs.csegpu1/datasets/LibriMix/LibriMix/LibriSpeech/train-360_mapping.json"
 
     dm = LibriDataModule(
         data_root=DATA_ROOT,
         train_speaker_map_path=TRAIN_SPK_MAP,
-        train_batch_size=8,
-        val_batch_size=4,
-        num_workers=20,
+        train_batch_size=32,
+        val_batch_size=16,
+        num_workers=40,
         sample_rate=16000,
     )
 
@@ -199,10 +221,10 @@ if __name__ == "__main__":
 
     wandb_logger = WandbLogger(
         project="librispeech-speaker-encoder",
-        name="ft_wavlm_asp_arcface_tr460",
+        name="cord_landwehr_arcface_tr460",
         # name='test_run',
         log_model=False,
-        save_dir="/mnt/disks/data/model_ckpts/ft_wavlm_asp_arcface_tr460/wandb_logs",
+        save_dir="/home/sidcs.csegpu1/model_ckpts/cord_landwehr_arcface_tr460/wandb_logs",
     )
 
     ckpt = pl.callbacks.ModelCheckpoint(
@@ -210,7 +232,7 @@ if __name__ == "__main__":
         mode="min",
         save_top_k=-1,
         filename="best-{epoch}",
-        dirpath="/mnt/disks/data/model_ckpts/ft_wavlm_asp_arcface_tr460/"
+        dirpath="/home/sidcs.csegpu1/model_ckpts/cord_landwehr_arcface_tr460/"
     )
 
     trainer = pl.Trainer(
@@ -218,7 +240,7 @@ if __name__ == "__main__":
         
         accelerator="gpu",
 
-        devices=[0, 1, 2, 3],
+        devices=[0, 1, 2, 3, 4,5 ,6,7],
         max_epochs=60,
         logger=wandb_logger,
         callbacks=[ckpt],
