@@ -16,11 +16,11 @@ from sklearn.metrics import (
 from sklearn.manifold import TSNE
 import matplotlib.pyplot as plt
 import sys
-sys.path.append('/home/sidcs/codebase/wavlm_dual_embedding')
+sys.path.append('/home/sidcs/wavlm_dual_embedding')
 from model import SpeakerEncoderDualWrapper   # your dual model class
 
 # Needed for teacher model
-sys.path.append("/home/sidcs/codebase/")
+sys.path.append("/home/sidcs/")
 # from wavlm_single_embedding.model import SpeakerEncoderWrapper as SingleSpkEncoder
 from wavlm_single_embedding.model import ECAPA_TDNN as SingleSpeakerEncoderWrapper
 
@@ -29,7 +29,7 @@ from wavlm_single_embedding.model import ECAPA_TDNN as SingleSpeakerEncoderWrapp
 # Global noise config
 # -----------------------------
 add_noise = True  # set True to enable noise corruption
-noise_dir = "/home/sidcs/datasets/LibriMix/LibriMix/wham_noise/tt"
+noise_dir = "/tmp/sidcs/turbo/sidcs_backup/datasets/LibriMix/LibriMix/wham_noise/tt"
 noise_files = [
     os.path.join(noise_dir, f)
     for f in os.listdir(noise_dir)
@@ -37,6 +37,15 @@ noise_files = [
 ]
 
 random.seed(44)
+
+# Metadata CSVs store absolute paths from where they were generated;
+# remap them to where the dataset lives on the compute node.
+PATH_REMAP = ("/home/sidcs/datasets/", "/tmp/sidcs/turbo/sidcs_backup/datasets/")
+
+
+def remap_path(p):
+    old, new = PATH_REMAP
+    return new + p[len(old):] if p.startswith(old) else p
 
 
 # =====================================================================
@@ -123,9 +132,9 @@ def parse_metadata(csv_path):
                 continue
 
             metadata.append({
-                "mix_path": mix_path,
-                "src1": src1,
-                "src2": src2,
+                "mix_path": remap_path(mix_path),
+                "src1": remap_path(src1),
+                "src2": remap_path(src2),
                 "spk1": int(spk1),
                 "spk2": int(spk2),
             })
@@ -409,11 +418,11 @@ def plot_tsne_subset(embs, labels, num_speakers=40, save_path="tsne_subset.png")
 # 6) MAIN
 # =====================================================================
 if __name__ == "__main__":
-    META = "/home/sidcs/datasets/LibriMix/LibriMix/Libriuni_05_08/Libri2Mix_ovl50to80/wav16k/min/metadata/mixture_test_mix_clean.csv"
+    META = "/tmp/sidcs/turbo/sidcs_backup/datasets/LibriMix/LibriMix/Libriuni_05_08/Libri2Mix_ovl50to80/wav16k/min/metadata/mixture_test_mix_clean.csv"
 
-    CKPT = "/home/sidcs/model_ckpts/librispeech_asp_ft_ecapa_linear_dualemb_tr360/best-epoch=144-val_separation=0.000.ckpt"
+    CKPT = "/tmp/sidcs/turbo/sidcs_backup/model_ckpts/CAUSAL_ECAPA_UNMIX_2048_teacher_ECAPA/best-epoch=70-loss=0.1346.ckpt"
     # CKPT = "/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_dualemb/best-epoch=50-val_separation=0.000.ckpt" # WITHOUT FINE-TUNING WAVLM LAST 6 LAYERS
-    TEACHER_CKPT = "/home/sidcs/model_ckpts/librispeech_asp_wavlm_tr360/best-epoch=62-val_separation=0.000.ckpt"
+    TEACHER_CKPT = "/tmp/sidcs/turbo/sidcs_backup/model_ckpts/ecapa_tdnn_arcface_tr360/best-epoch=30-val_separation=0.000.ckpt"
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print("Using device:", device)

@@ -15,7 +15,7 @@ from loss import LossWraper
 from metrics import EmbeddingMetrics
 import wandb
 import sys
-sys.path.append("/home/sidcs/codebase/")
+sys.path.append("/home/sidcs/")
 
 # from wavlm_single_embedding.model import SpeakerEncoderWrapper as SingleSpeakerEncoderWrapper
 from wavlm_single_embedding.model import ECAPA_TDNN as SingleSpeakerEncoderWrapper
@@ -39,7 +39,7 @@ class MySpEmb(pl.LightningModule):
         lr: float = 1e-4,
         finetune_encoder: bool = False,
         emb_dim: int = 256,
-        speaker_map_path: str = "/home/sidcs/datasets/LibriMix/LibriMix/Libriuni_03_08/Libri2Mix_ovl30to80/wav16k/min/metadata/train360_mapping.json",
+        speaker_map_path: str = "/tmp/sidcs/turbo/sidcs_backup/datasets/LibriMix/LibriMix/Libriuni_03_08/Libri2Mix_ovl30to80/wav16k/min/metadata/train360_mapping.json",
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -64,8 +64,8 @@ class MySpEmb(pl.LightningModule):
         #Get the teacher model
         # self.single_sp_model = SingleSpeakerEncoderWrapper(emb_dim=emb_dim)
         self.single_sp_model = SingleSpeakerEncoderWrapper(C=1024)
-        # teacher_ckpt_path = "/home/sidcs/model_ckpts/librispeech_asp_wavlm_tr360/best-epoch=62-val_separation=0.000.ckpt"
-        teacher_ckpt_path = "/home/sidcs/model_ckpts/ecapa_tdnn_arcface_tr360/best-epoch=30-val_separation=0.000.ckpt"
+        # teacher_ckpt_path = "/home/sidcs.csegpu1/model_ckpts/librispeech_asp_wavlm_tr360/best-epoch=62-val_separation=0.000.ckpt"
+        teacher_ckpt_path = "/tmp/sidcs/turbo/sidcs_backup/model_ckpts/ecapa_tdnn_arcface_tr360/best-epoch=30-val_separation=0.000.ckpt"
         ckpt = torch.load(teacher_ckpt_path, map_location="cpu")
         state = ckpt["state_dict"]
 
@@ -225,17 +225,17 @@ class MySpEmb(pl.LightningModule):
 # MAIN
 # ---------------------------------------
 if __name__ == "__main__":
-    DATA_ROOT = "/home/sidcs/datasets/LibriMix/LibriMix" 
-    SPEAKER_MAP = "/home/sidcs/datasets/LibriMix/LibriMix/Libriuni_05_08/Libri2Mix_ovl50to80/wav16k/min/metadata/train360_mapping.json"
+    DATA_ROOT = "/tmp/sidcs/turbo/sidcs_backup/datasets/LibriMix/LibriMix" 
+    SPEAKER_MAP = "/tmp/sidcs/turbo/sidcs_backup/datasets/LibriMix/LibriMix/Libriuni_05_08/Libri2Mix_ovl50to80/wav16k/min/metadata/train360_mapping.json"
 
 
-    dm = LibriMixDataModule(
-        data_root=DATA_ROOT,
-        speaker_map_path=SPEAKER_MAP,
-        batch_size=32*4, 
-        num_workers=20, # Set this to your preference
-        num_speakers=2
-    )
+    # dm = LibriMixDataModule(
+    #     data_root=DATA_ROOT,
+    #     speaker_map_path=SPEAKER_MAP,
+    #     batch_size=32*4, 
+    #     num_workers=20, # Set this to your preference
+    #     num_speakers=2
+    # )
 
     model = MySpEmb(
         lr=1e-4,
@@ -246,53 +246,63 @@ if __name__ == "__main__":
 
     wandb_logger = WandbLogger(
         project="librispeech-speaker-encoder",
-        name="ECAPA_UNMIX_2048_teacher_ECAPA",
+        name="CAUSAL_ECAPA_UNMIX_2048_teacher_ECAPA",
         # name='test_run',
         log_model=False,
-        save_dir="/home/sidcs/model_ckpts/ECAPA_UNMIX_2048_teacher_ECAPA/wandb_logs",
+        save_dir="/tmp/sidcs/turbo/sidcs_backup/model_ckpts/CAUSAL_ECAPA_UNMIX_2048_teacher_ECAPA/wandb_logs",
+    )
+
+    # ckpt = pl.callbacks.ModelCheckpoint(
+    #     monitor="train/loss",
+    #     mode="min",
+    #     save_top_k=1,
+    #     filename="best-{epoch}-{val_separation:.3f}",
+    #     dirpath="/home/sidcs.csegpu1/model_ckpts/CAUSAL_ECAPA_UNMIX_2048_teacher_ECAPA/"
+    # )
+
+    # trainer = pl.Trainer(
+    #     strategy="ddp_find_unused_parameters_true",
+    #     accelerator="gpu",
+    #     devices=[4,5,6],
+
+    #     max_epochs=150,
+    #     logger=wandb_logger,
+    #     callbacks=[ckpt],
+    #     gradient_clip_val=5.0,
+    #     enable_checkpointing=True,
+    # )
+    CKPT_DIR="/tmp/sidcs/turbo/sidcs_backup/model_ckpts/CAUSAL_ECAPA_UNMIX_2048_teacher_ECAPA/"
+    dm = LibriMixDataModule(
+        data_root=DATA_ROOT,
+        speaker_map_path=SPEAKER_MAP,
+        batch_size=32*4,
+        num_workers=int(os.environ.get("SLURM_CPUS_PER_TASK", 8)) - 1,
+        num_speakers=2,
     )
 
     ckpt = pl.callbacks.ModelCheckpoint(
         monitor="train/loss",
         mode="min",
         save_top_k=1,
-        filename="best-{epoch}-{val_separation:.3f}",
-        dirpath="/home/sidcs/model_ckpts/ECAPA_UNMIX_2048_teacher_ECAPA/"
+        save_last=True,
+        filename="best-epoch={epoch}-loss={train/loss:.4f}",
+        auto_insert_metric_name=False,
+        dirpath=CKPT_DIR,
     )
 
     trainer = pl.Trainer(
         strategy="ddp_find_unused_parameters_true",
         accelerator="gpu",
-        devices=[0, 1, 2, 3],
-
+        devices=int(os.environ.get("SLURM_NTASKS_PER_NODE", 1)),
         max_epochs=150,
         logger=wandb_logger,
         callbacks=[ckpt],
         gradient_clip_val=5.0,
-        enable_checkpointing=True,
     )
 
-    # trainer = pl.Trainer(
-    #     accelerator='gpu',
-    #     devices=[0],
-    #     max_epochs=100,
-    #     logger=wandb_logger,
-    #     overfit_batches=1,
-    #     limit_train_batches=1,
-    #     limit_val_batches=1,
-    #     num_sanity_val_steps=0,
-    #     enable_checkpointing=False,
-    # )
-
-    # trainer = pl.Trainer(
-    #     accelerator="gpu",
-    #     devices=1,
-    #     max_epochs=1,
-    #     limit_train_batches=1,
-    #     limit_val_batches=1,
-    #     num_sanity_val_steps=0,
-    # )
-    trainer.fit(model, datamodule=dm)
-    # trainer.fit(model, datamodule=dm, ckpt_path='/home/sidcs/model_ckpts/librispeech_asp_ft_ecapa_linear_dualemb_tr360/best-epoch=49-val_separation=0.000.ckpt')
+    last = os.path.join(CKPT_DIR, "last.ckpt")
+    trainer.fit(model, datamodule=dm, ckpt_path=last if os.path.exists(last) else None)
+    # trainer.fit(model, datamodule=dm)
+    # trainer.fit(model, datamodule=dm, ckpt_path='/home/sidcs.csegpu1/model_ckpts/librispeech_asp_ft_ecapa_linear_dualemb_tr360/best-epoch=49-val_separation=0.000.ckpt')
     # trainer.validate(model, datamodule=dm)
     wandb.finish()

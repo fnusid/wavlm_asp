@@ -155,13 +155,16 @@ class EmbeddingMetrics:
                     same.append(cos)
                 else:
                     diff.append(cos)
-        separation = np.mean(same) - np.mean(diff)
+
+        same_mean = np.mean(same) if same else 0.0
+        diff_mean = np.mean(diff) if diff else 0.0
+        separation = same_mean - diff_mean
 
         # 2. clustering
         if num_clusters is None:
             num_clusters = len(np.unique(labels))
 
-        kmeans = KMeans(n_clusters=num_clusters, n_init=10)
+        kmeans = KMeans(n_clusters=num_clusters, n_init=10, random_state=0)
         pred = kmeans.fit_predict(embs)
 
         cluster_acc = self._cluster_accuracy(pred, labels)
@@ -174,11 +177,13 @@ class EmbeddingMetrics:
             silhouette = float("nan")
 
         return {
-            "separation": separation,
-            "cluster_acc": cluster_acc,
-            "nmi": nmi,
-            "ari": ari,
-            "silhouette": silhouette,
+            "same_mean_cos": float(same_mean),
+            "diff_mean_cos": float(diff_mean),
+            "separation": float(separation),
+            "cluster_acc": float(cluster_acc),
+            "nmi": float(nmi),
+            "ari": float(ari),
+            "silhouette": float(silhouette),
         }
 
     # -------------------------------------------------------

@@ -10,6 +10,13 @@ import os
 import pytorch_lightning as pl
 from torch.nn.utils.rnn import pad_sequence
 
+# CSVs and noise JSONs still reference the old local dataset location.
+OLD_DATA_PREFIX = "/home/sidcs/datasets/"
+NEW_DATA_PREFIX = "/tmp/sidcs/turbo/sidcs_backup/datasets/"
+
+def remap(path):
+    return path.replace(OLD_DATA_PREFIX, NEW_DATA_PREFIX, 1)
+
 
 def mix_noise_with_snr(clean, noise, snr_db):
     """
@@ -47,9 +54,9 @@ class MyLibri2Mix(Dataset):
    
         self.noise_prob = 0.5
         if split=='train':
-            self.noise_file_path = "/home/sidcs/datasets/LibriMix/LibriMix/noise_files_embedding_model/freesound_noise_bins.json" #[freesound, sound-bible, wham tr]
+            self.noise_file_path = "/tmp/sidcs/turbo/sidcs_backup/datasets/LibriMix/LibriMix/noise_files_embedding_model/freesound_noise_bins.json" #[freesound, sound-bible, wham tr]
         elif split == 'val':
-            self.noise_file_path = "/home/sidcs/datasets/LibriMix/LibriMix/noise_files_embedding_model/wham_tt_noise_bins.json"
+            self.noise_file_path = "/tmp/sidcs/turbo/sidcs_backup/datasets/LibriMix/LibriMix/noise_files_embedding_model/wham_tt_noise_bins.json"
 
         with open(self.noise_file_path, 'r') as f:
             self.noise_dict = json.load(f)
@@ -72,7 +79,7 @@ class MyLibri2Mix(Dataset):
 
         mix_path = row['mixture_path']
 
-        mix_audio, _ = torchaudio.load(mix_path)
+        mix_audio, _ = torchaudio.load(remap(mix_path))
 
         #add noise with a probability
 
@@ -116,7 +123,7 @@ class MyLibri2Mix(Dataset):
             # Final fallback: skip adding noise
             if valid_key is not None:
                 noise_file = random.choice(self.noise_dict[valid_key])
-                noise_audio, sr = torchaudio.load(noise_file)
+                noise_audio, sr = torchaudio.load(remap(noise_file))
 
                 r = random.random()
                 if r < 0.4:
@@ -131,7 +138,7 @@ class MyLibri2Mix(Dataset):
         source_audios = []
         for i in range(self.num_speakers):
             s_path = row[f"source_{i+1}_path"]
-            s_audio,_ = torchaudio.load(s_path)
+            s_audio,_ = torchaudio.load(remap(s_path))
             source_audios.append(s_audio)
         
         sources_tensor = torch.cat(source_audios, dim = 0) #[B,2,T]
