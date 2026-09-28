@@ -99,6 +99,8 @@ class MySpEmb(pl.LightningModule):
     # -----------------------------
     # TRAINING
     # -----------------------------
+    def on_train_epoch_start(self):
+        self.single_sp_model.eval()   # re-freeze BN/dropout every epoch
     def training_step(self, batch, batch_idx):
         """
         batch: (wav, speaker_label)
@@ -249,7 +251,7 @@ if __name__ == "__main__":
         name="CAUSAL_ECAPA_UNMIX_2048_teacher_ECAPA",
         # name='test_run',
         log_model=False,
-        save_dir="/tmp/sidcs/turbo/sidcs_backup/model_ckpts/CAUSAL_ECAPA_UNMIX_2048_teacher_ECAPA/wandb_logs",
+        save_dir="/tmp/sidcs/turbo/sidcs_backup/model_ckpts/CAUSAL_ECAPA_UNMIX_2048_teacher_ECAPA_redo/wandb_logs",
     )
 
     # ckpt = pl.callbacks.ModelCheckpoint(
@@ -271,7 +273,7 @@ if __name__ == "__main__":
     #     gradient_clip_val=5.0,
     #     enable_checkpointing=True,
     # )
-    CKPT_DIR="/tmp/sidcs/turbo/sidcs_backup/model_ckpts/CAUSAL_ECAPA_UNMIX_2048_teacher_ECAPA/"
+    CKPT_DIR="/tmp/sidcs/turbo/sidcs_backup/model_ckpts/CAUSAL_ECAPA_UNMIX_2048_teacher_ECAPA_redo/"
     dm = LibriMixDataModule(
         data_root=DATA_ROOT,
         speaker_map_path=SPEAKER_MAP,
@@ -294,7 +296,7 @@ if __name__ == "__main__":
         strategy="ddp_find_unused_parameters_true",
         accelerator="gpu",
         devices=int(os.environ.get("SLURM_NTASKS_PER_NODE", 1)),
-        max_epochs=150,
+        max_epochs=50,
         logger=wandb_logger,
         callbacks=[ckpt],
         gradient_clip_val=5.0,
