@@ -7,6 +7,7 @@ import pytorch_lightning as pl
 import matplotlib.pyplot as plt
 
 from pytorch_lightning.loggers import WandbLogger
+from pytorch_lightning.plugins.environments import SLURMEnvironment
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from dataset import LibriMixDataModule       
@@ -15,7 +16,7 @@ from loss import LossWraper
 from metrics import EmbeddingMetrics
 import wandb
 import sys
-sys.path.append("/home/sidcs/codebase/")
+sys.path.append("/home/sidcs/")
 
 # from wavlm_single_embedding.model import SpeakerEncoderWrapper as SingleSpeakerEncoderWrapper
 from wavlm_single_embedding.model import ECAPA_TDNN as SingleSpeakerEncoderWrapper
@@ -23,6 +24,32 @@ import random
 random.seed(42)
 import warnings
 warnings.filterwarnings("ignore")
+
+def get_slurm_config():
+    """
+    Read the resource allocation from the SLURM env (set by sbatch/srun).
+    Falls back to local defaults when not running under SLURM.
+    """
+    in_slurm = "SLURM_JOB_ID" in os.environ
+    if in_slurm:
+        # --ntasks-per-node must equal the number of GPUs per node for Lightning DDP
+        ntasks = os.environ.get("SLURM_NTASKS_PER_NODE") or os.environ.get("SLURM_GPUS_ON_NODE")
+        devices = int(ntasks.split("(")[0]) if ntasks else torch.cuda.device_count()
+        num_nodes = int(os.environ.get("SLURM_NNODES", 1))
+        cpus_per_task = int(os.environ.get("SLURM_CPUS_PER_TASK", 1))
+        num_workers = max(cpus_per_task - 1, 0)  # leave one core for the main process
+    else:
+        devices = torch.cuda.device_count()
+        num_nodes = 1
+        num_workers = 20
+
+    return {
+        "in_slurm": in_slurm,
+        "job_id": os.environ.get("SLURM_JOB_ID"),
+        "devices": devices,
+        "num_nodes": num_nodes,
+        "num_workers": num_workers,
+    }
 
 def strip_model_prefix(state):
     new_state = {}
@@ -39,7 +66,7 @@ class MySpEmb(pl.LightningModule):
         lr: float = 1e-4,
         finetune_encoder: bool = False,
         emb_dim: int = 256,
-        speaker_map_path: str = "/home/sidcs/datasets/LibriMix/LibriMix/Libriuni_03_08/Libri2Mix_ovl30to80/wav16k/min/metadata/train360_mapping.json",
+        speaker_map_path: str = "/tmp/sidcs/turbo/sidcs_backup/datasets/LibriMix/LibriMix/Libriuni_03_08/Libri2Mix_ovl30to80/wav16k/min/metadata/train360_mapping.json",
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -65,7 +92,7 @@ class MySpEmb(pl.LightningModule):
         # self.single_sp_model = SingleSpeakerEncoderWrapper(emb_dim=emb_dim)
         self.single_sp_model = SingleSpeakerEncoderWrapper(C=1024)
         # teacher_ckpt_path = "/home/sidcs/model_ckpts/librispeech_asp_wavlm_tr360/best-epoch=62-val_separation=0.000.ckpt"
-        teacher_ckpt_path = "/home/sidcs/model_ckpts/ecapa_tdnn_arcface_tr360/best-epoch=30-val_separation=0.000.ckpt"
+        teacher_ckpt_path = "/tmp/sidcs/turbo/sidcs_backup//model_ckpts/ecapa_tdnn_arcface_tr360/best-epoch=30-val_separation=0.000.ckpt"
         ckpt = torch.load(teacher_ckpt_path, map_location="cpu")
         state = ckpt["state_dict"]
 
@@ -99,6 +126,8 @@ class MySpEmb(pl.LightningModule):
     # -----------------------------
     # TRAINING
     # -----------------------------
+    def on_train_epoch_start(self):
+        self.single_sp_model.eval()   # re-freeze BN/dropout every epoch
     def training_step(self, batch, batch_idx):
         """
         batch: (wav, speaker_label)
@@ -225,15 +254,17 @@ class MySpEmb(pl.LightningModule):
 # MAIN
 # ---------------------------------------
 if __name__ == "__main__":
-    DATA_ROOT = "/home/sidcs/datasets/LibriMix/LibriMix" 
-    SPEAKER_MAP = "/home/sidcs/datasets/LibriMix/LibriMix/Libriuni_05_08/Libri2Mix_ovl50to80/wav16k/min/metadata/train360_mapping.json"
+    DATA_ROOT = "/tmp/sidcs/turbo/sidcs_backup/datasets/LibriMix/LibriMix" 
+    SPEAKER_MAP = "/tmp/sidcs/turbo/sidcs_backup/datasets/LibriMix/LibriMix/Libriuni_05_08/Libri2Mix_ovl50to80/wav16k/min/metadata/train360_mapping.json"
 
+    slurm_cfg = get_slurm_config()
+    print("SLURM config:", slurm_cfg)
 
     dm = LibriMixDataModule(
         data_root=DATA_ROOT,
         speaker_map_path=SPEAKER_MAP,
-        batch_size=32*4, 
-        num_workers=20, # Set this to your preference
+        batch_size=32*4,
+        num_workers=slurm_cfg["num_workers"], # from --cpus-per-task
         num_speakers=2
     )
 
@@ -249,7 +280,8 @@ if __name__ == "__main__":
         name="ECAPA_UNMIX_2048_teacher_ECAPA",
         # name='test_run',
         log_model=False,
-        save_dir="/home/sidcs/model_ckpts/ECAPA_UNMIX_2048_teacher_ECAPA/wandb_logs",
+        save_dir="/tmp/sidcs/turbo/sidcs_backup/model_ckpts/ECAPA_UNMIX_2048_teacher_ECAPA/wandb_logs",
+        config={"slurm_job_id": slurm_cfg["job_id"]},
     )
 
     ckpt = pl.callbacks.ModelCheckpoint(
@@ -257,17 +289,23 @@ if __name__ == "__main__":
         mode="min",
         save_top_k=1,
         filename="best-{epoch}-{val_separation:.3f}",
-        dirpath="/home/sidcs/model_ckpts/ECAPA_UNMIX_2048_teacher_ECAPA/"
+        dirpath="/tmp/sidcs/turbo/sidcs_backup/model_ckpts/ECAPA_UNMIX_2048_teacher_ECAPA/"
     )
+
+    # Rich progress bar draws nothing when stdout is a file (sbatch); tqdm writes to the .err log.
+    # Refresh less often under SLURM so the log doesn't balloon.
+    progress_bar = pl.callbacks.TQDMProgressBar(refresh_rate=50 if slurm_cfg["in_slurm"] else 1)
 
     trainer = pl.Trainer(
         strategy="ddp_find_unused_parameters_true",
         accelerator="gpu",
-        devices=[0, 1, 2, 3],
+        devices=slurm_cfg["devices"],          # from --ntasks-per-node / --gres=gpu:N
+        num_nodes=slurm_cfg["num_nodes"],      # from --nodes
+        plugins=[SLURMEnvironment(auto_requeue=False)] if slurm_cfg["in_slurm"] else None,
 
         max_epochs=150,
         logger=wandb_logger,
-        callbacks=[ckpt],
+        callbacks=[ckpt, progress_bar],
         gradient_clip_val=5.0,
         enable_checkpointing=True,
     )

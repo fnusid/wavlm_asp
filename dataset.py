@@ -11,6 +11,10 @@ import pytorch_lightning as pl
 from torch.nn.utils.rnn import pad_sequence
 
 
+OLD_DATA_PREFIX = "/home/sidcs/datasets/"
+NEW_DATA_PREFIX = "/tmp/sidcs/turbo/sidcs_backup/datasets/"
+
+
 def mix_noise_with_snr(clean, noise, snr_db):
     """
     clean, noise: torch tensors [T]
@@ -49,12 +53,19 @@ class MyLibri2Mix(Dataset):
         if split=='train':
             self.noise_file_path = "/tmp/sidcs/turbo/sidcs_backup/datasets/LibriMix/LibriMix/noise_files_embedding_model/freesound_noise_bins.json" #[freesound, sound-bible, wham tr]
         elif split == 'val':
-            self.noise_file_path = "/tmp/sidcs/turbo/sidcs_backup/LibriMix/LibriMix/noise_files_embedding_model/wham_tt_noise_bins.json"
+            self.noise_file_path = "/tmp/sidcs/turbo/sidcs_backup/datasets/LibriMix/LibriMix/noise_files_embedding_model/wham_tt_noise_bins.json"
 
         with open(self.noise_file_path, 'r') as f:
             self.noise_dict = json.load(f)
 
-        
+        # metadata csv + noise json store absolute paths from the old machine; point them at turbo
+        for col in ["mixture_path", "source_1_path", "source_2_path"]:
+            self.metadata[col] = self.metadata[col].str.replace(OLD_DATA_PREFIX, NEW_DATA_PREFIX, n=1, regex=False)
+        self.noise_dict = {
+            k: [p.replace(OLD_DATA_PREFIX, NEW_DATA_PREFIX, 1) for p in v]
+            for k, v in self.noise_dict.items()
+        }
+
 
 
         self.num_speakers = num_speakers
