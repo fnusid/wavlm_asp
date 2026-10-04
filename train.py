@@ -87,7 +87,7 @@ class MySpEmb(pl.LightningModule):
             speaker_map = json.load(f)
 
 
-        self.cosine_loss = LossWraper()
+        self.cosine_loss = LossWraper(lam=1)
         #Get the teacher model
         # self.single_sp_model = SingleSpeakerEncoderWrapper(emb_dim=emb_dim)
         self.single_sp_model = SingleSpeakerEncoderWrapper(C=1024)
@@ -277,10 +277,10 @@ if __name__ == "__main__":
 
     wandb_logger = WandbLogger(
         project="librispeech-speaker-encoder",
-        name="ECAPA_UNMIX_2048_teacher_ECAPA",
+        name="ECAPA_UNMIX_2048_teacher_ECAPA_relation_1_hinge",
         # name='test_run',
         log_model=False,
-        save_dir="/tmp/sidcs/turbo/sidcs_backup/model_ckpts/ECAPA_UNMIX_2048_teacher_ECAPA/wandb_logs",
+        save_dir="/tmp/sidcs/turbo/sidcs_backup/model_ckpts/ECAPA_UNMIX_2048_teacher_ECAPA_relation_1_hinge/wandb_logs",
         config={"slurm_job_id": slurm_cfg["job_id"]},
     )
 
@@ -289,7 +289,7 @@ if __name__ == "__main__":
         mode="min",
         save_top_k=1,
         filename="best-{epoch}-{val_separation:.3f}",
-        dirpath="/tmp/sidcs/turbo/sidcs_backup/model_ckpts/ECAPA_UNMIX_2048_teacher_ECAPA/"
+        dirpath="/tmp/sidcs/turbo/sidcs_backup/model_ckpts/ECAPA_UNMIX_2048_teacher_ECAPA_relation_1_hinge/"
     )
 
     # Rich progress bar draws nothing when stdout is a file (sbatch); tqdm writes to the .err log.

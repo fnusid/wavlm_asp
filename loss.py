@@ -1,67 +1,81 @@
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from scipy.optimize import linear_sum_assignment
-import math
-
-
 
 
 class LossWraper(nn.Module):
-    def __init__(self):
+    """
+    Drop-in replacement: training code can still call `loss = self.cosine_loss(emb, gt_embs)`.
+    Loss components from the last call are stored in `self.last` for logging.
+
+    lam = 0.0  -> plain PIT cosine distillation (identical to the old Hungarian version)
+    lam > 0.0  -> PIT cosine + relational (inter-head) distillation
+    """
+
+    def __init__(self, lam: float = 0.1):
         super().__init__()
-
-        # self.loss_fn = ArcFaceLoss(n_classes = num_class, emb_dim = emb_dim, s = s, m=m)
-        self.loss_fn = CosineSimilarityLoss()
-        
-
+        # self.loss_fn = ArcFaceLoss(n_classes=num_class, emb_dim=emb_dim, s=s, m=m)
+        self.loss_fn = PITCosineRelLoss(lam=lam)
+        self.last = {}
 
     def forward(self, pred, gt):
         """
-        pred: [B, 2, D]
-        gt:   [B, 2, D]
+        pred: [B, 2, D]  student embeddings
+        gt:   [B, 2, D]  teacher embeddings of the clean sources
         """
-        loss = self.loss_fn(pred, gt)
+        loss, parts = self.loss_fn(pred, gt)
+        self.last = parts
         return loss
 
 
-class CosineSimilarityLoss(nn.Module):
-    def __init__(self):
+class PITCosineRelLoss(nn.Module):
+    """
+    PIT cosine distillation + relational distillation.
+
+    PIT term:  for each mixture, pick the better of the 2 head->speaker permutations
+               and minimise 1 - mean cosine (same objective as Hungarian for 2x2).
+    Rel term:  make cos(student head 1, student head 2) match
+               cos(teacher spk 1, teacher spk 2) for the same mixture.
+               Penalises head collapse without forcing similar speakers apart.
+    """
+
+    def __init__(self, lam: float = 0.1, dup_threshold: float = 0.7):
         super().__init__()
+        self.lam = lam
+        self.dup_threshold = dup_threshold
 
     def forward(self, pred, gt):
-        """
-        pred: [B, 2, D]
-        gt:   [B, 2, D]
-        """
-        # Normalize
-        pred = F.normalize(pred, p=2, dim=-1)   # [B,2,D]
-        gt   = F.normalize(gt,   p=2, dim=-1)   # [B,2,D]
+        assert pred.shape == gt.shape and pred.size(1) == 2, "expects [B, 2, D] for K=2"
 
-        # Cosine similarity matrix: [B,2,2]
+        pred = F.normalize(pred, p=2, dim=-1)  # [B,2,D]
+        gt = F.normalize(gt, p=2, dim=-1)      # [B,2,D]
 
-        cos = torch.matmul(pred, gt.transpose(1, 2))
+        # cos[b, k, j] = cos(student head k, teacher speaker j)
+        cos = torch.einsum("bkd,bjd->bkj", pred, gt)  # [B,2,2]
 
-        batch_size = cos.size(0)
-        loss_total = 0.0
+        # Two permutations for K=2
+        perm_a = 0.5 * (cos[:, 0, 0] + cos[:, 1, 1])
+        perm_b = 0.5 * (cos[:, 0, 1] + cos[:, 1, 0])
+        pit = 1.0 - torch.maximum(perm_a, perm_b)     # [B]
 
-        for b in range(batch_size):
+        # Relational term: one cosine per mixture (NOT a [B, B] cross-batch matrix)
+        cos_s = (pred[:, 0] * pred[:, 1]).sum(-1)     # [B] student inter-head cosine
+        cos_t = (gt[:, 0] * gt[:, 1]).sum(-1)         # [B] teacher inter-speaker cosine
+        # rel = (cos_s - cos_t).pow(2)                  # [B]
+        rel = F.relu(cos_s - cos_t - 0.05).pow(2)
+        # Both terms are batch means, so lam is NOT divided by batch size
+        loss = pit.mean() + self.lam * rel.mean()
 
-            # Hungarian on CPU (no gradients needed)
-            cost = -cos[b].detach().cpu().numpy()      # [2,2]
-            row_ind, col_ind = linear_sum_assignment(cost)
-
-            # selected cosines with gradient
-            sim = cos[b, row_ind, col_ind]             # 2 values
-
-            # loss = 1 - mean(sim)
-            loss_b = 1.0 - sim.mean()
-
-            loss_total += loss_b
-
-        return loss_total / batch_size
-
-
+        parts = {
+            "pit": pit.mean().detach(),
+            "rel": rel.mean().detach(),
+            "cos_student_heads": cos_s.mean().detach(),
+            "cos_teacher_spk": cos_t.mean().detach(),
+            "dup_proxy": (cos_s > self.dup_threshold).float().mean().detach(),
+        }
+        return loss, parts
 
 
 class ArcFaceLoss(nn.Module):
@@ -93,12 +107,9 @@ class ArcFaceLoss(nn.Module):
         embeddings: [B, D]  - model output embeddings
         labels:     [B]     - ground truth speaker IDs (ints)
         """
-        # Normalize features and weights
-
         x = F.normalize(embeddings, dim=1)
         W = F.normalize(self.weight, dim=1)
 
-        # Cosine similarity between embeddings and class weights
         cosine = F.linear(x, W)  # [B, n_classes]
         sine = torch.sqrt((1.0 - cosine ** 2).clamp(0, 1))
 
@@ -106,15 +117,45 @@ class ArcFaceLoss(nn.Module):
         phi = cosine * self.cos_m - sine * self.sin_m
         phi = torch.where(cosine > self.th, phi, cosine - self.mm)
 
-        # Replace cosine value for the target class with phi
-
-        # logits = (labels * phi) + ((1.0 - labels) * cosine)
+        idx = torch.arange(embeddings.size(0), device=embeddings.device)
         logits = cosine.clone()
-        logits[torch.arange(embeddings.size(0)), labels] = phi[torch.arange(embeddings.size(0)), labels]
-        logits *= self.s
+        logits[idx, labels] = phi[idx, labels]
+        logits = logits * self.s
 
-        # Compute standard cross-entropy loss
-        loss = F.cross_entropy(logits, labels)
+        return F.cross_entropy(logits, labels)
 
-        preds = torch.argmax(logits, dim = 1)
-        return loss
+
+# ---------------------------------------------------------------------
+# Sanity check: python loss.py
+# ---------------------------------------------------------------------
+if __name__ == "__main__":
+    from scipy.optimize import linear_sum_assignment
+
+    torch.manual_seed(0)
+    B, D = 64, 256
+    pred = torch.randn(B, 2, D, requires_grad=True)
+    gt = torch.randn(B, 2, D)
+
+    # 1) PIT term matches the old Hungarian loop
+    p, g = F.normalize(pred, dim=-1), F.normalize(gt, dim=-1)
+    cos = torch.matmul(p, g.transpose(1, 2))
+    old = 0.0
+    for b in range(B):
+        r, c = linear_sum_assignment(-cos[b].detach().numpy())
+        old += 1.0 - cos[b, r, c].mean()
+    old = old / B
+    new = LossWraper(lam=0.0)(pred, gt)
+    print(f"Hungarian PIT: {old.item():.6f} | vectorized PIT: {new.item():.6f}")
+    assert torch.allclose(old, new, atol=1e-6)
+
+    # 2) Relational term penalises collapse
+    crit = LossWraper(lam=1.0)
+    distinct = gt.clone()                                  # heads = teacher targets
+    collapsed = gt[:, [0, 0], :].clone()                   # both heads = speaker 1
+    crit(distinct, gt); print("distinct heads :", {k: round(v.item(), 4) for k, v in crit.last.items()})
+    crit(collapsed, gt); print("collapsed heads:", {k: round(v.item(), 4) for k, v in crit.last.items()})
+
+    # 3) Gradients flow
+    LossWraper(lam=0.5)(pred, gt).backward()
+    print("grad norm:", pred.grad.norm().item())
+    print("OK")

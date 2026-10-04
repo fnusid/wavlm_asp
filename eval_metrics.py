@@ -420,7 +420,8 @@ def plot_tsne_subset(embs, labels, num_speakers=40, save_path="tsne_subset.png")
 if __name__ == "__main__":
     META = "/tmp/sidcs/turbo/sidcs_backup/datasets/LibriMix/LibriMix/Libriuni_05_08/Libri2Mix_ovl50to80/wav16k/min/metadata/mixture_test_mix_clean.csv"
 
-    CKPT = "/tmp/sidcs/turbo/sidcs_backup/model_ckpts/ECAPA_UNMIX_2048_teacher_ECAPA//best-epoch=74-val_separation=0.000.ckpt"
+    # CKPT = "/tmp/sidcs/turbo/sidcs_backup/model_ckpts/ECAPA_UNMIX_2048_teacher_ECAPA//best-epoch=74-val_separation=0.000.ckpt"
+    CKPT= "/tmp/sidcs/turbo/sidcs_backup/model_ckpts/ECAPA_UNMIX_2048_teacher_ECAPA_relation_1_hinge/best-epoch=57-val_separation=0.000.ckpt"
     # CKPT = "/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_dualemb/best-epoch=50-val_separation=0.000.ckpt" # WITHOUT FINE-TUNING WAVLM LAST 6 LAYERS
     # TEACHER_CKPT = "/tmp/sidcs/turbo/sidcs_backup/model_ckpts/librispeech_asp_wavlm_tr360/best-epoch=62-val_separation=0.000.ckpt"
     TEACHER_CKPT = "/tmp/sidcs/turbo/sidcs_backup/model_ckpts/ecapa_tdnn_arcface_tr360/best-epoch=30-val_separation=0.000.ckpt"
