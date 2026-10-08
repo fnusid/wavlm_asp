@@ -20,7 +20,7 @@ import matplotlib.pyplot as plt
 from model import SpeakerEncoderDualWrapper   # your dual model class
 
 # Needed for teacher model
-sys.path.append("/home/sidcs.csegpu1/codebase/")
+sys.path.append("/home/sidcs/")
 from wavlm_single_embedding.model import SpeakerEncoderWrapper as SingleSpkEncoder
 
 
@@ -28,7 +28,7 @@ from wavlm_single_embedding.model import SpeakerEncoderWrapper as SingleSpkEncod
 # Global noise config
 # -----------------------------
 add_noise = True  # set True to enable noise corruption
-noise_dir = "/home/sidcs.csegpu1/datasets/LibriMix/LibriMix/wham_noise/tt"
+noise_dir = "/tmp/sidcs/turbo/sidcs_backup/datasets/LibriMix/LibriMix/wham_noise/tt"
 noise_files = [
     os.path.join(noise_dir, f)
     for f in os.listdir(noise_dir)
@@ -91,6 +91,17 @@ def load_dual_model(ckpt_path, emb_dim=256, device="cuda"):
 # =====================================================================
 # 2) LibriMix metadata parser
 # =====================================================================
+# CSV wav paths were written on the old machine; point them at the turbo copy
+OLD_DATA_ROOT = "/home/sidcs/datasets/"
+NEW_DATA_ROOT = "/tmp/sidcs/turbo/sidcs_backup/datasets/"
+
+
+def remap_path(p):
+    if p.startswith(OLD_DATA_ROOT):
+        return NEW_DATA_ROOT + p[len(OLD_DATA_ROOT):]
+    return p
+
+
 def parse_metadata(csv_path):
     metadata = []
     filename = os.path.basename(csv_path)
@@ -113,9 +124,9 @@ def parse_metadata(csv_path):
                 continue
 
             metadata.append({
-                "mix_path": mix_path,
-                "src1": src1,
-                "src2": src2,
+                "mix_path": remap_path(mix_path),
+                "src1": remap_path(src1),
+                "src2": remap_path(src2),
                 "spk1": int(spk1),
                 "spk2": int(spk2),
             })
@@ -329,13 +340,14 @@ def plot_tsne_subset(embs, labels, num_speakers=4, save_path="tsne_subset.png"):
 # 6) MAIN
 # =====================================================================
 if __name__ == "__main__":
-    META = "/home/sidcs.csegpu1/datasets/LibriMix/LibriMix/Libriuni_05_08/Libri2Mix_ovl50to80/wav16k/min/metadata/mixture_test_mix_clean.csv"
+    META = "/tmp/sidcs/turbo/sidcs_backup/datasets/LibriMix/LibriMix/Libriuni_05_08/Libri2Mix_ovl50to80/wav16k/min/metadata/mixture_test_mix_clean.csv"
     # CKPT = "/mnt/disks/data/model_ckpts/librispeech_asp_ft_wavlm_linear_dualemb_tr360/best-epoch=49-val_separation=0.000.ckpt"
     # CKPT = "/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_dualemb/best-epoch=50-val_separation=0.000.ckpt" # WITHOUT FINE-TUNING WAVLM LAST 6 LAYERS
-    CKPT = "/home/sidcs.csegpu1/model_ckpts/ft_wavlm_linear_dualemb_noteacher_tr360/best-epoch=12-val_separation=0.000.ckpt"
-    TEACHER_CKPT = "/home/sidcs.csegpu1/model_ckpts/librispeech_asp_wavlm_tr360/best-epoch=62-val_separation=0.000.ckpt"
-    linear_ckpt_path = "/home/sidcs.csegpu1/model_ckpts/ft_wavlm_linear_dualemb_noteacher_tr360_linearmappingtotr/best-epoch=47-val_separation=0.000.ckpt"
-    TSNE_SAVE_PATH = "/home/sidcs.csegpu1/codebase/wavlm_dual_embedding/analysis/mapping_to_tr_linear/dual_devclean_whamtt_subset_tsne_linearasp.png"
+    CKPT = "/tmp/sidcs/turbo/sidcs_backup/model_ckpts/ft_wavlm_linear_dualemb_noteacher_tr360/best-epoch=12-val_separation=0.000.ckpt"
+    
+    TEACHER_CKPT = "/tmp/sidcs/turbo/sidcs_backup/model_ckpts/librispeech_asp_wavlm_tr360/best-epoch=62-val_separation=0.000.ckpt"
+    linear_ckpt_path = "/tmp/sidcs/turbo/sidcs_backup/model_ckpts/ft_wavlm_linear_dualemb_noteacher_tr360_linearmappingtotr/best-epoch=47-val_separation=0.000.ckpt"
+    # TSNE_SAVE_PATH = "/home/sidcs.csegpu1/codebase/wavlm_dual_embedding/analysis/mapping_to_tr_linear/dual_devclean_whamtt_subset_tsne_linearasp.png"
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print("Using device:", device)
@@ -375,7 +387,7 @@ if __name__ == "__main__":
     linear_state = linear_ckpt["state_dict"]
     linear_sd = {k[len("linear_map."):]: v for k, v in linear_state.items() if k.startswith("linear_map.")}
     linear_layer.load_state_dict(linear_sd)
-
+  
     # ---- Extract Embeddings ----
     embs, labels = extract_dual_embeddings_with_teacher(
         dual_model=dual,
@@ -400,5 +412,5 @@ if __name__ == "__main__":
     print(f"ari           = {res['ari']:.4f}")
     print(f"silhouette    = {res['silhouette']:.4f}")
 
-    # ---- TSNE on subset of speakers ----
-    plot_tsne_subset(embs, labels, num_speakers=20, save_path=TSNE_SAVE_PATH)
+    # # ---- TSNE on subset of speakers ----
+    # plot_tsne_subset(embs, labels, num_speakers=20, save_path=TSNE_SAVE_PATH)
