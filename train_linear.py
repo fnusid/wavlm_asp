@@ -24,6 +24,21 @@ random.seed(42)
 import warnings
 warnings.filterwarnings("ignore")
 
+def trim_edges(x, thr=1e-4, pad=160):
+    """Cut the zero padding before the first and after the last sample above `thr`.
+    x: [T] tensor. `pad` keeps 10 ms on each side. Natural pauses inside are untouched."""
+    idx = torch.nonzero(x.abs() > thr).squeeze(-1)
+    if idx.numel() == 0:
+        return x
+    s = max(int(idx[0]) - pad, 0)
+    e = min(int(idx[-1]) + 1 + pad, x.shape[-1])
+    return x[s:e]
+
+@torch.no_grad()
+def embed_trimmed(teacher, srcs):
+    """srcs: [B, T] -> [B, D], each source trimmed on its own."""
+    return torch.stack([teacher(trim_edges(s)[None])[0] for s in srcs])
+
 def strip_model_prefix(state):
     new_state = {}
     for k, v in state.items():
@@ -39,7 +54,7 @@ class MySpEmb(pl.LightningModule):
         lr: float = 1e-4,
         finetune_encoder: bool = False,
         emb_dim: int = 256,
-        speaker_map_path: str = "/home/sidcs.csegpu1/datasets/LibriMix/LibriMix/Libriuni_05_08/Libri2Mix_ovl50to80/wav16k/min/metadata/train360_mapping.json",
+        speaker_map_path: str = "/tmp/sidcs/turbo/sidcs_backup/datasets/LibriMix/LibriMix/Libriuni_05_08/Libri2Mix_ovl50to80/wav16k/min/metadata/train360_mapping.json",
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -130,8 +145,10 @@ class MySpEmb(pl.LightningModule):
         mix, source, labels = batch
         emb = self.forward(mix)                    # [B, 2, emb_dim]
         with torch.no_grad():
-            emb1 = self.single_sp_model(source[:, 0, :])  # [B, emb_dim]
-            emb2 = self.single_sp_model(source[:, 1, :])  # [B, emb_dim]
+            # emb1 = self.single_sp_model(source[:, 0, :])  # [B, emb_dim]
+            # emb2 = self.single_sp_model(source[:, 1, :])  # [B, emb_dim]
+            emb1 = embed_trimmed(self.single_sp_model, source[:, 0, :])
+            emb2 = embed_trimmed(self.single_sp_model, source[:, 1, :])
             gt_embs = torch.stack([emb1, emb2], dim=1)  # [B, 2, emb_dim]
 
         mapped_emb = self.linear_map(emb)
@@ -168,8 +185,10 @@ class MySpEmb(pl.LightningModule):
         mix, source, labels = batch
         emb = self.forward(mix)                    # [B, 2, emb_dim]
         with torch.no_grad():
-            emb1 = self.single_sp_model(source[:, 0, :])  # [B, emb_dim]
-            emb2 = self.single_sp_model(source[:, 1, :])  # [B, emb_dim]
+            # emb1 = self.single_sp_model(source[:, 0, :])  # [B, emb_dim]
+            # emb2 = self.single_sp_model(source[:, 1, :])  # [B, emb_dim]
+            emb1 = embed_trimmed(self.single_sp_model, source[:, 0, :])
+            emb2 = embed_trimmed(self.single_sp_model, source[:, 1, :])
             gt_embs = torch.stack([emb1, emb2], dim=1)     # [B, 2, emb_dim]
 
         mapped_emb = self.linear_map(emb)
@@ -262,15 +281,21 @@ class MySpEmb(pl.LightningModule):
 # MAIN
 # ---------------------------------------
 if __name__ == "__main__":
-    DATA_ROOT = "/home/sidcs.csegpu1/datasets/LibriMix/LibriMix" 
-    SPEAKER_MAP = "/home/sidcs.csegpu1/datasets/LibriMix/LibriMix/Libriuni_05_08/Libri2Mix_ovl50to80/wav16k/min/metadata/train360_mapping.json"
+    # One DDP process per SLURM task (one GPU each); fall back to 1 when run outside SLURM
+    NUM_GPUS = int(os.environ.get("SLURM_NTASKS_PER_NODE", 1))
+    NUM_NODES = int(os.environ.get("SLURM_JOB_NUM_NODES", 1))
+    CPUS_PER_TASK = int(os.environ.get("SLURM_CPUS_PER_TASK", 8))
 
+    DATA_ROOT = "/tmp/sidcs/turbo/sidcs_backup/datasets/LibriMix/LibriMix"
+    SPEAKER_MAP = "/tmp/sidcs/turbo/sidcs_backup/datasets/LibriMix/LibriMix/Libriuni_05_08/Libri2Mix_ovl50to80/wav16k/min/metadata/train360_mapping.json"
 
+    print("NUM GPU :", NUM_GPUS)
+    print("NUM_WORKERS:", CPUS_PER_TASK - 1)
     dm = LibriMixDataModule(
         data_root=DATA_ROOT,
         speaker_map_path=SPEAKER_MAP,
-        batch_size=32, 
-        num_workers=20, # Set this to your preference
+        batch_size=32,
+        num_workers=CPUS_PER_TASK - 1,  # per GPU process; leave one core for the main process
         num_speakers=2
     )
 
@@ -283,10 +308,10 @@ if __name__ == "__main__":
 
     wandb_logger = WandbLogger(
         project="librispeech-speaker-encoder",
-        name="ft_wavlm_linear_dualemb_noteacher_tr360_linearmappingtotr",
+        name="ft_wavlm_linear_dualemb_noteacher_tr360_linearmappingtotr_after_silencetrim",
         # name='test_run',
         log_model=False,
-        save_dir="/home/sidcs.csegpu1/model_ckpts/ft_wavlm_linear_dualemb_noteacher_tr360_linearmappingtotr/wandb_logs",
+        save_dir="/tmp/sidcs/turbo/sidcs_backup/model_ckpts/ft_wavlm_linear_dualemb_noteacher_tr360_linearmappingtotr_after_silencetrim/wandb_logs",
     )
 
     ckpt = pl.callbacks.ModelCheckpoint(
@@ -294,13 +319,15 @@ if __name__ == "__main__":
         mode="min",
         save_top_k=1,
         filename="best-{epoch}-{val_separation:.3f}",
-        dirpath="/home/sidcs.csegpu1/model_ckpts/ft_wavlm_linear_dualemb_noteacher_tr360_linearmappingtotr/"
+        dirpath="/tmp/sidcs/turbo/sidcs_backup/model_ckpts/ft_wavlm_linear_dualemb_noteacher_tr360_linearmappingtotr/"
     )
 
     trainer = pl.Trainer(
         strategy="ddp_find_unused_parameters_true",
         accelerator="gpu",
-        devices=[0, 1, 2, 3],
+        # devices=[0, 1, 2, 3],
+        devices=NUM_GPUS,
+        num_nodes=NUM_NODES,
         max_epochs=50,
         logger=wandb_logger,
         callbacks=[ckpt],

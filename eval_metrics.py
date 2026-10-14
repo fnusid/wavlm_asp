@@ -37,6 +37,29 @@ noise_files = [
 
 random.seed(44)
 
+def trim_edges(x, thr=1e-4, pad=160):
+    """Cut the zero padding before the first and after the last sample above `thr`.
+    x: [T] tensor. `pad` keeps 10 ms on each side. Natural pauses inside are untouched."""
+    idx = torch.nonzero(x.abs() > thr).squeeze(-1)
+    if idx.numel() == 0:
+        return x
+    s = max(int(idx[0]) - pad, 0)
+    e = min(int(idx[-1]) + 1 + pad, x.shape[-1])
+    return x[s:e]
+
+@torch.no_grad()
+def embed_trimmed(teacher, srcs):
+    """srcs: [B, T] -> [B, D], each source trimmed on its own."""
+    return torch.stack([teacher(trim_edges(s)[None])[0] for s in srcs])
+
+def strip_model_prefix(state):
+    new_state = {}
+    for k, v in state.items():
+        if k.startswith("model."):
+            new_state[k[len("model."):]] = v   # remove "model."
+        else:
+            new_state[k] = v
+    return new_state
 
 # =====================================================================
 # 0) Utility: mix with SNR
@@ -142,7 +165,8 @@ def get_teacher_emb(teacher_model, wav_path, device="cuda"):
     wav = wav.mean(0).to(device).unsqueeze(0)
 
     with torch.no_grad():
-        e = teacher_model(wav)  # [1,256]
+        # e = teacher_model(wav)  # [1,256]
+        e = embed_trimmed(teacher_model, wav)
     return e.squeeze(0)  # [256]
 
 
@@ -346,7 +370,8 @@ if __name__ == "__main__":
     CKPT = "/tmp/sidcs/turbo/sidcs_backup/model_ckpts/ft_wavlm_linear_dualemb_noteacher_tr360/best-epoch=12-val_separation=0.000.ckpt"
     
     TEACHER_CKPT = "/tmp/sidcs/turbo/sidcs_backup/model_ckpts/librispeech_asp_wavlm_tr360/best-epoch=62-val_separation=0.000.ckpt"
-    linear_ckpt_path = "/tmp/sidcs/turbo/sidcs_backup/model_ckpts/ft_wavlm_linear_dualemb_noteacher_tr360_linearmappingtotr/best-epoch=47-val_separation=0.000.ckpt"
+    # linear_ckpt_path = "/tmp/sidcs/turbo/sidcs_backup/model_ckpts/ft_wavlm_linear_dualemb_noteacher_tr360_linearmappingtotr/best-epoch=47-val_separation=0.000.ckpt"
+    linear_ckpt_path = "/tmp/sidcs/turbo/sidcs_backup/model_ckpts/ft_wavlm_linear_dualemb_noteacher_tr360_linearmappingtotr_after_silencetrim/best-epoch=16-val_separation=0.000.ckpt"
     # TSNE_SAVE_PATH = "/home/sidcs.csegpu1/codebase/wavlm_dual_embedding/analysis/mapping_to_tr_linear/dual_devclean_whamtt_subset_tsne_linearasp.png"
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
